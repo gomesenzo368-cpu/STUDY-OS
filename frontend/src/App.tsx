@@ -27,6 +27,9 @@ import {
   GripVertical,
   MoveRight,
   Upload,
+  ClipboardCheck,
+  Sparkles,
+  Eye,
 } from "lucide-react";
 import { api } from "./api";
 import RichTextEditor from "./components/RichTextEditor";
@@ -43,9 +46,17 @@ import { useAuth } from "./contexts/AuthContext";
 import AuthPage from "./pages/AuthPage";
 import SettingsPage from "./pages/SettingsPage";
 import SubjectIcon from "./components/SubjectIcon";
+import {
+  AssistantPage,
+  ControlsPage,
+  PlanningPage,
+  ProgressPage,
+  RevisionsPage,
+  StudyCoursePage,
+} from "./components/study/ModulePages";
 import { useI18n } from "./i18n/i18n";
 
-type Page = "home" | "courses" | "settings" | "placeholder";
+type Page = "home" | "courses" | "revisions" | "controls" | "planning" | "progress" | "assistant" | "study" | "settings" | "placeholder";
 type ThemeMode = "light" | "dark" | "system";
 type ModalState = {
   entity: Entity;
@@ -58,23 +69,46 @@ type OrganizationEntry = {
   kind: "subject" | "chapter" | "folder" | "course";
   id: number;
   label: string;
+  createdAt: string;
+  icon?: string | null;
   secondary?: string;
 };
 type OrganizationScope =
   | { kind: "subjects" }
   | { kind: "chapters"; subjectId: number }
+  | { kind: "folder-courses"; folderId: number }
   | { kind: "chapter-items"; chapterId: number };
 
 const navItems = [
   { id: "home", label: "sidebar.home", icon: LayoutDashboard },
   { id: "courses", label: "sidebar.courses", icon: BookOpen },
   { id: "revisions", label: "sidebar.revisions", icon: BrainCircuit },
-  { id: "controls", label: "sidebar.controls", icon: Target },
+  { id: "controls", label: "sidebar.controls", icon: ClipboardCheck },
   { id: "planning", label: "sidebar.planning", icon: CalendarDays },
   { id: "progress", label: "sidebar.progress", icon: TrendingUp },
-  { id: "assistant", label: "sidebar.assistant", icon: CircleHelp },
+  { id: "assistant", label: "sidebar.assistant", icon: Sparkles },
   { id: "settings", label: "sidebar.settings", icon: Settings },
 ] as const;
+
+function comparePositionedItems(
+  first: { position: number | null; created_at: string; id: number },
+  second: { position: number | null; created_at: string; id: number },
+) {
+  if (first.position !== null && second.position !== null && first.position !== second.position) {
+    return first.position - second.position;
+  }
+  if (first.position !== null && second.position === null) return -1;
+  if (first.position === null && second.position !== null) return 1;
+  const createdAtOrder = first.created_at.localeCompare(second.created_at);
+  return createdAtOrder || first.id - second.id;
+}
+
+function compareFolderCourses(first: Course, second: Course) {
+  if (first.folder_position !== null && second.folder_position !== null && first.folder_position !== second.folder_position) return first.folder_position - second.folder_position;
+  if (first.folder_position !== null && second.folder_position === null) return -1;
+  if (first.folder_position === null && second.folder_position !== null) return 1;
+  return first.created_at.localeCompare(second.created_at) || first.id - second.id;
+}
 
 function organizationEntries(
   scope: OrganizationScope,
@@ -85,17 +119,32 @@ function organizationEntries(
   localItemOrder?: string[],
 ): OrganizationEntry[] {
   if (scope.kind === "subjects") {
-    return subjects.map((subject) => ({ key: `subject:${subject.id}`, kind: "subject", id: subject.id, label: subject.name }));
+    return [...subjects].sort(comparePositionedItems).map((subject) => ({ key: `subject:${subject.id}`, kind: "subject", id: subject.id, label: subject.name, createdAt: subject.created_at, icon: subject.icon }));
   }
   if (scope.kind === "chapters") {
-    return chapters.filter((chapter) => chapter.subject_id === scope.subjectId).map((chapter) => ({ key: `chapter:${chapter.id}`, kind: "chapter", id: chapter.id, label: chapter.name }));
+    return chapters.filter((chapter) => chapter.subject_id === scope.subjectId).sort(comparePositionedItems).map((chapter) => ({ key: `chapter:${chapter.id}`, kind: "chapter", id: chapter.id, label: chapter.name, createdAt: chapter.created_at }));
+  }
+  if (scope.kind === "folder-courses") {
+    return courses
+      .filter((course) => course.folder_id === scope.folderId)
+      .sort(compareFolderCourses)
+      .map((course) => ({ key: `course:${course.id}`, kind: "course", id: course.id, label: course.title, createdAt: course.created_at, secondary: "Cours" }));
   }
   const entries = [
-    ...folders.filter((folder) => folder.chapter_id === scope.chapterId).map((folder) => ({ key: `folder:${folder.id}`, kind: "folder" as const, id: folder.id, label: folder.name, secondary: "Dossier de cours" })),
-    ...courses.filter((course) => course.chapter_id === scope.chapterId).map((course) => ({ key: `course:${course.id}`, kind: "course" as const, id: course.id, label: course.title, secondary: "Cours" })),
+    ...folders.filter((folder) => folder.chapter_id === scope.chapterId).map((folder) => ({ key: `folder:${folder.id}`, kind: "folder" as const, id: folder.id, label: folder.name, createdAt: folder.created_at, secondary: "Dossier de cours" })),
+    ...courses.filter((course) => course.chapter_id === scope.chapterId && course.folder_id === null).map((course) => ({ key: `course:${course.id}`, kind: "course" as const, id: course.id, label: course.title, createdAt: course.created_at, secondary: "Cours" })),
   ];
   const order = new Map((localItemOrder ?? []).map((key, index) => [key, index]));
-  return entries.sort((first, second) => (order.get(first.key) ?? Number.MAX_SAFE_INTEGER) - (order.get(second.key) ?? Number.MAX_SAFE_INTEGER));
+  return entries.sort((first, second) => {
+    const firstPosition = order.get(first.key) ?? Number.MAX_SAFE_INTEGER;
+    const secondPosition = order.get(second.key) ?? Number.MAX_SAFE_INTEGER;
+    if (firstPosition !== secondPosition) return firstPosition - secondPosition;
+    return first.createdAt.localeCompare(second.createdAt);
+  });
+}
+
+function chapterItemKey(item: { type: "course" | "folder"; id: number }) {
+  return `${item.type}:${item.id}`;
 }
 
 function App() {
@@ -121,11 +170,30 @@ function App() {
   const [selectedSubject, setSelectedSubject] = useState<number | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+  const [openFolderId, setOpenFolderId] = useState<number | null>(null);
+  const [previewFolderId, setPreviewFolderId] = useState<number | null>(null);
+  const [folderAddMenuId, setFolderAddMenuId] = useState<number | null>(null);
   const [organization, setOrganization] = useState<OrganizationScope | null>(null);
   const [organizationSaving, setOrganizationSaving] = useState(false);
   const [localChapterItemOrders, setLocalChapterItemOrders] = useState<Record<number, string[]>>({});
   const [modal, setModal] = useState<ModalState>(null);
   const [error, setError] = useState("");
+  const loadChapterItemOrder = async (chapterId: number) => {
+    try {
+      const items = await api.chapterItems(chapterId);
+      const order = items.map(chapterItemKey);
+      setLocalChapterItemOrders((current) => {
+        if (order.length === 0) {
+          const next = { ...current };
+          delete next[chapterId];
+          return next;
+        }
+        return { ...current, [chapterId]: order };
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errors.server"));
+    }
+  };
   const handleSignOut = async () => {
     try {
       await signOut();
@@ -163,6 +231,14 @@ function App() {
     localStorage.setItem("study-os-theme-mode", themeMode);
     localStorage.setItem("study-os-theme", dark ? "dark" : "light");
   }, [dark, themeMode]);
+  useEffect(() => {
+    if (previewFolderId === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewFolderId(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [previewFolderId]);
 
   const filteredSubjects = useMemo(
     () =>
@@ -242,6 +318,9 @@ function App() {
         await api.deleteCourseFolder(id);
         setCourseFolders((current) => current.filter((folder) => folder.id !== id));
         setCourses((current) => current.map((course) => course.folder_id === id ? { ...course, folder_id: null } : course));
+        if (openFolderId === id) setOpenFolderId(null);
+        if (previewFolderId === id) setPreviewFolderId(null);
+        if (folderAddMenuId === id) setFolderAddMenuId(null);
       } else {
         await api.deleteCourse(id);
         await loadData();
@@ -283,23 +362,75 @@ function App() {
 
   const finishOrganization = async (scope: OrganizationScope, entries: OrganizationEntry[]) => {
     if (scope.kind === "subjects") {
-      const byId = new Map(subjects.map((subject) => [subject.id, subject]));
-      setSubjects(entries.map((entry) => byId.get(entry.id)).filter((subject): subject is Subject => Boolean(subject)));
-      setOrganization(null);
+      try {
+        setError("");
+        setOrganizationSaving(true);
+        await api.reorderSubjects(entries.map((entry) => entry.id));
+        const byId = new Map(subjects.map((subject) => [subject.id, subject]));
+        setSubjects(entries.flatMap((entry, position) => {
+          const subject = byId.get(entry.id);
+          return subject ? [{ ...subject, position }] : [];
+        }));
+        setOrganization(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'La sauvegarde de l’ordre a échoué.');
+      } finally {
+        setOrganizationSaving(false);
+      }
       return;
     }
 
     if (scope.kind === "chapters") {
-      const orderedIds = entries.map((entry) => entry.id);
-      const selectedIds = new Set(orderedIds);
-      const ordered = entries.map((entry) => chapters.find((chapter) => chapter.id === entry.id)).filter((chapter): chapter is Chapter => Boolean(chapter));
-      let cursor = 0;
-      setChapters((current) => current.map((chapter) => chapter.subject_id === scope.subjectId && selectedIds.has(chapter.id) ? ordered[cursor++] : chapter));
-      setOrganization(null);
+      try {
+        setError("");
+        setOrganizationSaving(true);
+        await api.reorderChapters(scope.subjectId, entries.map((entry) => entry.id));
+        const positions = new Map(entries.map((entry, position) => [entry.id, position]));
+        setChapters((current) => current.map((chapter) => {
+          const position = positions.get(chapter.id);
+          return chapter.subject_id === scope.subjectId && position !== undefined
+            ? { ...chapter, position }
+            : chapter;
+        }));
+        setOrganization(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'La sauvegarde de l’ordre a échoué.');
+      } finally {
+        setOrganizationSaving(false);
+      }
       return;
     }
 
-    const orderedKeys = entries.map((entry) => entry.key);
+    if (scope.kind === "folder-courses") {
+      try {
+        setError("");
+        setOrganizationSaving(true);
+        await api.reorderFolderCourses(scope.folderId, entries.map((entry) => entry.id));
+        const positions = new Map(entries.map((entry, position) => [entry.id, position]));
+        setCourses((current) => current.map((course) => {
+          const position = positions.get(course.id);
+          return course.folder_id === scope.folderId && position !== undefined
+            ? { ...course, folder_position: position }
+            : course;
+        }));
+        setOrganization(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'La sauvegarde de l’ordre a échoué.');
+      } finally {
+        setOrganizationSaving(false);
+      }
+      return;
+    }
+
+    const visibleKeys = new Set(entries.map((entry) => entry.key));
+    const currentChapterOrder = localChapterItemOrders[scope.chapterId] ?? [];
+    let nextVisibleIndex = 0;
+    const orderedKeys = currentChapterOrder.length
+      ? [
+          ...currentChapterOrder.map((key) => visibleKeys.has(key) ? entries[nextVisibleIndex++]!.key : key),
+          ...entries.slice(nextVisibleIndex).map((entry) => entry.key),
+        ]
+      : entries.map((entry) => entry.key);
     const seen = new Set<string>();
     const hasDuplicate = orderedKeys.some((key) => {
       if (seen.has(key)) return true;
@@ -328,12 +459,59 @@ function App() {
   const selectSubject = (id: number) => {
     setSelectedSubject(id > 0 ? id : null);
     setSelectedChapter(null);
+    setOpenFolderId(null);
+    setPreviewFolderId(null);
+    setFolderAddMenuId(null);
     setPage("courses");
   };
-  const selectChapter = (id: number) => setSelectedChapter(id);
+  const selectChapter = (id: number) => {
+    setSelectedChapter(id);
+    setOpenFolderId(null);
+    setPreviewFolderId(null);
+    setFolderAddMenuId(null);
+    void loadChapterItemOrder(id);
+  };
   const openCourse = (course: Course) => {
     setSelectedCourseId(course.id);
+    setOpenFolderId(null);
+    setPreviewFolderId(null);
+    setFolderAddMenuId(null);
     setPage("courses");
+  };
+
+  const attachCoursesToFolder = async (folder: CourseFolder, coursesToAttach: Course[]) => {
+    await Promise.all(coursesToAttach.map((course) => api.appendCourseToFolder(course, folder.id)));
+    const attachedIds = new Set(coursesToAttach.map((course) => course.id));
+    setCourses((current) => current.map((course) => attachedIds.has(course.id) ? { ...course, folder_id: folder.id } : course));
+    setFolderAddMenuId(null);
+  };
+
+  const resetCourseContext = () => {
+    setSelectedSubject(null);
+    setSelectedChapter(null);
+    setSelectedCourseId(null);
+    setOpenFolderId(null);
+    setPreviewFolderId(null);
+    setFolderAddMenuId(null);
+    setOrganization(null);
+    setOrganizationSaving(false);
+    setModal(null);
+  };
+
+  const isCourseContext = (value: Page) => value === "courses" || value === "study";
+  const navigateToPage = (nextPage: Page) => {
+    if (isCourseContext(page) !== isCourseContext(nextPage)) {
+      resetCourseContext();
+    }
+    setPage(nextPage);
+  };
+  const navigateFromPrimaryNavigation = (nextPage: Page) => {
+    if (nextPage === "courses") {
+      resetCourseContext();
+      setPage("courses");
+      return;
+    }
+    navigateToPage(nextPage);
   };
 
   return (
@@ -352,15 +530,13 @@ function App() {
             <button
               key={id}
               aria-current={
-                (id === "home" && page === "home") ||
-                (id === "courses" && page === "courses")
+                page === id
                   ? "page"
                   : undefined
               }
-              className={`nav-item ${(id === "home" && page === "home") || (id === "courses" && page === "courses") ? "active" : ""}`}
+              className={`nav-item ${page === id ? "active" : ""}`}
               onClick={() => {
-                if (id === "home" || id === "courses") setPage(id);
-                else setPage("placeholder");
+                navigateFromPrimaryNavigation(id);
               }}
             >
               <Icon size={18} strokeWidth={1.8} />
@@ -372,7 +548,7 @@ function App() {
         <nav className="sidebar-settings">
           <button
             className={`nav-item ${page === "settings" ? "active" : ""}`}
-            onClick={() => setPage("settings")}
+            onClick={() => navigateToPage("settings")}
           >
             <Settings size={18} strokeWidth={1.8} />
             <span>{t('sidebar.settings')}</span>
@@ -406,7 +582,7 @@ function App() {
               className="profile-button"
               title={t('settings.profile')}
               aria-label={t('settings.profile')}
-              onClick={() => setPage("settings")}
+              onClick={() => navigateToPage("settings")}
             >
               <MoreHorizontal size={18} />
             </button>
@@ -424,6 +600,16 @@ function App() {
                 ? t('sidebar.home')
               : page === "courses"
                 ? t('sidebar.courses')
+              : page === "revisions"
+                ? t('sidebar.revisions')
+              : page === "controls"
+                ? t('sidebar.controls')
+              : page === "planning"
+                ? t('sidebar.planning')
+              : page === "progress"
+                ? t('sidebar.progress')
+              : page === "assistant"
+                ? t('sidebar.assistant')
                 : page === "settings"
                   ? t('sidebar.settings')
                   : t('sidebar.workspace')}
@@ -457,7 +643,7 @@ function App() {
               className="top-avatar"
               aria-label={t('settings.profile')}
               title={t('settings.profile')}
-              onClick={() => setPage("settings")}
+              onClick={() => navigateToPage("settings")}
             >
               {(user.email?.[0] ?? "A").toUpperCase()}
             </button>
@@ -480,6 +666,31 @@ function App() {
               onCancel={() => !organizationSaving && setOrganization(null)}
               onFinish={(items) => void finishOrganization(organization, items)}
             />
+          ) : page === "study" && selected.course ? (
+            <StudyCoursePage
+              course={selected.course}
+              subject={selected.subject}
+              chapter={selected.chapter}
+              onBack={() => setPage("courses")}
+            />
+          ) : !search.trim() && page === "revisions" ? (
+            <RevisionsPage
+              subjects={subjects}
+              chapters={chapters}
+              courses={courses}
+              onStudyCourse={(course) => {
+                setSelectedCourseId(course.id);
+                setPage("study");
+              }}
+            />
+          ) : !search.trim() && page === "controls" ? (
+            <ControlsPage />
+          ) : !search.trim() && page === "planning" ? (
+            <PlanningPage />
+          ) : !search.trim() && page === "progress" ? (
+            <ProgressPage />
+          ) : !search.trim() && page === "assistant" ? (
+            <AssistantPage />
           ) : search.trim() ? (
             <SearchResults
               query={search}
@@ -516,6 +727,7 @@ function App() {
                 subjects={subjects}
                 chapters={chapters}
                 onBack={() => setSelectedCourseId(null)}
+                onStudy={() => setPage("study")}
                 onEdit={(item) => setModal({ entity: "courses", item })}
                 onDelete={remove}
                 onMoved={async () => {
@@ -523,12 +735,26 @@ function App() {
                   await loadData();
                 }}
               />
+            ) : openFolderId !== null && selectedChapter ? (
+              <FolderDetail
+                folder={courseFolders.find((folder) => folder.id === openFolderId)}
+                chapter={selected.chapter}
+                subject={selected.subject}
+                courses={courses}
+                onBack={() => setOpenFolderId(null)}
+                onOpenCourse={openCourse}
+                onAddCourse={() => setFolderAddMenuId(openFolderId)}
+                onOrganize={() => setOrganization({ kind: "folder-courses", folderId: openFolderId })}
+                onEdit={(entity, item) => setModal({ entity, item })}
+                onDelete={remove}
+              />
             ) : (
               <CoursesView
                 subjects={subjects}
                 chapters={chapters}
                 courseFolders={courseFolders}
                 courses={courses}
+                chapterItemOrder={selectedChapter ? localChapterItemOrders[selectedChapter] : undefined}
                 selected={selected}
                 selectedSubject={selectedSubject}
                 selectedChapter={selectedChapter}
@@ -541,6 +767,8 @@ function App() {
                 onOrganizeSubjects={() => beginOrganization({ kind: "subjects" })}
                 onOrganizeChapters={(subjectId) => beginOrganization({ kind: "chapters", subjectId })}
                 onOrganizeItems={(chapterId) => beginOrganization({ kind: "chapter-items", chapterId })}
+                onOpenFolder={(folderId) => setOpenFolderId(folderId)}
+                onPreviewFolder={(folderId) => setPreviewFolderId(folderId)}
               />
             ))}
           {!organization && !search.trim() && page === "settings" && (
@@ -555,18 +783,14 @@ function App() {
         </div>
       </main>
       <nav className="mobile-nav">
-        {navItems.slice(0, 5).map(({ id, label, icon: Icon }) => (
+        {navItems.slice(0, 7).map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             className={
-              (id === "home" && page === "home") ||
-              (id === "courses" && page === "courses")
-                ? "active"
-                : ""
+              page === id ? "active" : ""
             }
             onClick={() => {
-              if (id === "home" || id === "courses") setPage(id);
-              else setPage("placeholder");
+              navigateFromPrimaryNavigation(id);
             }}
           >
             <Icon size={19} />
@@ -575,12 +799,35 @@ function App() {
         ))}
         <button
           className={page === "settings" ? "active" : ""}
-          onClick={() => setPage("settings")}
+          onClick={() => navigateToPage("settings")}
         >
           <Settings size={19} />
           <span>{t('sidebar.settings')}</span>
         </button>
       </nav>
+      {previewFolderId !== null && (
+        <FolderPreview
+          folder={courseFolders.find((folder) => folder.id === previewFolderId)}
+          courses={courses}
+          onClose={() => setPreviewFolderId(null)}
+          onOpenCourse={openCourse}
+        />
+      )}
+      {folderAddMenuId !== null && (
+        <FolderCourseAddModal
+          folder={courseFolders.find((folder) => folder.id === folderAddMenuId)}
+          courses={courses}
+          onClose={() => setFolderAddMenuId(null)}
+          onCreate={() => {
+            const folder = courseFolders.find((item) => item.id === folderAddMenuId);
+            if (!folder) return;
+            setFolderAddMenuId(null);
+            setModal({ entity: "courses", parentId: folder.chapter_id, folderId: folder.id });
+          }}
+          onAttach={attachCoursesToFolder}
+          onError={setError}
+        />
+      )}
       {modal &&
         (modal.entity === "subjects" ? (
           <SubjectEditor
@@ -597,7 +844,7 @@ function App() {
                       subject.id === savedSubject.id ? savedSubject : subject,
                     )
                   : [...current, savedSubject];
-                return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
+                return next.sort(comparePositionedItems);
               });
               setModal(null);
             }}
@@ -622,7 +869,7 @@ function App() {
                         chapter.id === savedItem.id ? savedItem : chapter,
                       )
                     : [...current, savedItem];
-                  return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
+                  return next.sort(comparePositionedItems);
                 });
               } else if (modal.entity === "course_folders" && savedItem && "name" in savedItem && !("title" in savedItem)) {
                 const savedFolder = savedItem as CourseFolder;
@@ -750,11 +997,11 @@ function OrganizationView({
     : scope.kind === "chapters"
       ? t('library.chapters')
       : t('library.title');
-  const iconFor = (kind: OrganizationEntry['kind']) => {
-    if (kind === "folder") return <Folder size={18} />;
-    if (kind === "course") return <FileText size={18} />;
-    if (kind === "chapter") return <ListTree size={18} />;
-    return <BookOpen size={18} />;
+  const iconFor = (entry: OrganizationEntry) => {
+    if (entry.kind === "folder") return <Folder size={18} />;
+    if (entry.kind === "course") return <FileText size={18} />;
+    if (entry.kind === "chapter") return <ListTree size={18} />;
+    return <SubjectIcon name={entry.icon} size={18} />;
   };
   const moveEntry = (sourceKey: string, targetKey: string) => {
     if (sourceKey === targetKey) return;
@@ -788,7 +1035,7 @@ function OrganizationView({
             onDrop={(event) => { event.preventDefault(); if (draggedKey) moveEntry(draggedKey, entry.key); setDraggedKey(null); }}
           >
             <GripVertical className="drag-handle" size={18} />
-            <span className="organization-icon">{iconFor(entry.kind)}</span>
+            <span className="organization-icon">{iconFor(entry)}</span>
             <span className="organization-copy"><strong>{entry.label}</strong>{entry.secondary && <small>{entry.secondary}</small>}</span>
           </div>
         )) : <div className="empty-state">{t('library.nothing')}</div>}
@@ -829,13 +1076,13 @@ function Dashboard({
       </div>
       <div className="welcome-row">
         <div>
-          <h1>
+          <h1 className="display-title">
             {t('home.welcome', { name: displayName })} <span>✦</span>
           </h1>
           <p>{t('home.subtitle')}</p>
         </div>
         <div className="welcome-actions">
-          <button className="secondary-button" onClick={onOrganize}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
+          <button className="small-button organize-button" onClick={onOrganize}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
           <button className="primary-button" onClick={onAdd}><Plus size={17} /> {t('home.newSubject')}</button>
         </div>
       </div>
@@ -987,6 +1234,7 @@ function CoursesView({
   chapters,
   courseFolders,
   courses,
+  chapterItemOrder,
   selected,
   selectedSubject,
   selectedChapter,
@@ -996,6 +1244,8 @@ function CoursesView({
   onAdd,
   onEdit,
   onDelete,
+  onOpenFolder,
+  onPreviewFolder,
   onOrganizeSubjects,
   onOrganizeChapters,
   onOrganizeItems,
@@ -1004,6 +1254,7 @@ function CoursesView({
   chapters: Chapter[];
   courseFolders: CourseFolder[];
   courses: Course[];
+  chapterItemOrder?: string[];
   selected: { subject?: Subject; chapter?: Chapter };
   selectedSubject: number | null;
   selectedChapter: number | null;
@@ -1013,17 +1264,20 @@ function CoursesView({
   onAdd: (modal: ModalState) => void;
   onEdit: (entity: Entity, item: Subject | Chapter | CourseFolder | Course) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
+  onOpenFolder: (folderId: number) => void;
+  onPreviewFolder: (folderId: number) => void;
   onOrganizeSubjects: () => void;
   onOrganizeChapters: (subjectId: number) => void;
   onOrganizeItems: (chapterId: number) => void;
 }) {
   const { t } = useI18n();
-  const visibleChapters = chapters.filter(
-    (chapter) => chapter.subject_id === selectedSubject,
-  );
-  const visibleCourses = courses.filter(
+  const visibleChapters = chapters
+    .filter((chapter) => chapter.subject_id === selectedSubject)
+    .sort(comparePositionedItems);
+  const chapterCourses = courses.filter(
     (course) => course.chapter_id === selectedChapter,
   );
+  const visibleCourses = chapterCourses.filter((course) => course.folder_id === null);
   return (
     <section className="courses-page">
       <div className="eyebrow">
@@ -1031,11 +1285,11 @@ function CoursesView({
       </div>
       <div className="welcome-row">
         <div>
-          <h1>{t('library.title')}</h1>
+          <h1 className="display-title">{t('library.title')}</h1>
           <p>{t('library.subtitle')}</p>
         </div>
         <div className="welcome-actions">
-          <button className="secondary-button" onClick={() => selectedChapter ? onOrganizeItems(selectedChapter) : selectedSubject ? onOrganizeChapters(selectedSubject) : onOrganizeSubjects()}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
+          <button className="small-button organize-button" onClick={() => selectedChapter ? onOrganizeItems(selectedChapter) : selectedSubject ? onOrganizeChapters(selectedSubject) : onOrganizeSubjects()}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
           <button className="primary-button" onClick={() => onAdd({ entity: "subjects" })}><Plus size={17} /> {t('library.add')}</button>
         </div>
       </div>
@@ -1087,7 +1341,9 @@ function CoursesView({
       ) : selected.chapter ? (
         <CourseList
           courses={visibleCourses}
+          allChapterCourses={chapterCourses}
           folders={courseFolders.filter((folder) => folder.chapter_id === selectedChapter)}
+          itemOrder={chapterItemOrder}
           chapter={selected.chapter}
           onAdd={(folderId) => onAdd({ entity: "courses", parentId: selectedChapter, folderId })}
           onAddFolder={() => onAdd({ entity: "course_folders", parentId: selectedChapter })}
@@ -1095,6 +1351,8 @@ function CoursesView({
           onOpen={onCourse}
           onEdit={onEdit}
           onDelete={onDelete}
+          onOpenFolder={onOpenFolder}
+          onPreviewFolder={onPreviewFolder}
         />
       ) : null}
     </section>
@@ -1175,7 +1433,9 @@ function EntityList({
 
 function CourseList({
   courses,
+  allChapterCourses,
   folders,
+  itemOrder,
   chapter,
   onAdd,
   onAddFolder,
@@ -1183,9 +1443,13 @@ function CourseList({
   onOpen,
   onEdit,
   onDelete,
+  onOpenFolder,
+  onPreviewFolder,
 }: {
   courses: Course[];
+  allChapterCourses: Course[];
   folders: CourseFolder[];
+  itemOrder?: string[];
   chapter: Chapter;
   onAdd: (folderId?: number) => void;
   onAddFolder: () => void;
@@ -1193,13 +1457,20 @@ function CourseList({
   onOpen: (course: Course) => void;
   onEdit: (entity: Entity, item: Course | CourseFolder) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
+  onOpenFolder: (folderId: number) => void;
+  onPreviewFolder: (folderId: number) => void;
 }) {
   const { t } = useI18n();
-  const [expandedFolders, setExpandedFolders] = useState<Set<number>>(() => new Set(folders.map((folder) => folder.id)));
+  const itemOrderMap = new Map((itemOrder ?? []).map((key, index) => [key, index]));
   const orderedItems = [
     ...folders.map((item) => ({ type: "folder" as const, item })),
     ...courses.map((item) => ({ type: "course" as const, item })),
-  ].sort((first, second) => first.item.created_at.localeCompare(second.item.created_at));
+  ].sort((first, second) => {
+    const firstPosition = itemOrderMap.get(`${first.type}:${first.item.id}`) ?? Number.MAX_SAFE_INTEGER;
+    const secondPosition = itemOrderMap.get(`${second.type}:${second.item.id}`) ?? Number.MAX_SAFE_INTEGER;
+    if (firstPosition !== secondPosition) return firstPosition - secondPosition;
+    return first.item.created_at.localeCompare(second.item.created_at);
+  });
   const renderCourse = (course: Course) => (
     <article className="course-row" key={`course-${course.id}`}>
       <button className="course-open" onClick={() => onOpen(course)}>
@@ -1212,23 +1483,24 @@ function CourseList({
         <ChevronRight className="course-arrow" size={18} />
       </button>
       <div className="row-actions">
-        <button title={t('actions.edit')} onClick={() => onEdit("courses", course)}><Pencil size={15} /></button>
-        <button title={t('actions.delete')} onClick={() => onDelete("courses", course.id, course.title)}><Trash2 size={15} /></button>
+        <button title={t('actions.edit')} onClick={(event) => { event.stopPropagation(); onEdit("courses", course); }}><Pencil size={15} /></button>
+        <button title={t('actions.delete')} onClick={(event) => { event.stopPropagation(); onDelete("courses", course.id, course.title); }}><Trash2 size={15} /></button>
       </div>
     </article>
   );
   const renderFolder = (folder: CourseFolder) => {
-    const folderCourses = courses.filter((course) => course.folder_id === folder.id);
+    const folderCourses = allChapterCourses.filter((course) => course.folder_id === folder.id);
     return <div className="chapter-item-group" key={`folder-${folder.id}`}>
       <article className="course-row folder-row">
-        <button className="course-open" aria-expanded={expandedFolders.has(folder.id)} onClick={() => setExpandedFolders((current) => { const next = new Set(current); if (next.has(folder.id)) next.delete(folder.id); else next.add(folder.id); return next; })}>
+        <button className="course-open folder-open" onClick={() => onOpenFolder(folder.id)}>
           <div className="course-file"><Folder size={20} /></div>
           <div className="course-copy"><div><span className="course-label">{t('library.newFolder')}</span><h3>{folder.name}</h3></div><small>{folderCourses.length} {t('library.coursesInFolder')}</small></div>
           <ChevronRight className="course-arrow" size={18} />
         </button>
         <div className="row-actions">
-          <button title={t('actions.edit')} onClick={() => onEdit('course_folders', folder)}><Pencil size={15} /></button>
-          <button title={t('actions.delete')} onClick={() => onDelete('course_folders', folder.id, folder.name)}><Trash2 size={15} /></button>
+          <button title="Voir les cours" aria-label="Voir les cours" onClick={(event) => { event.stopPropagation(); onPreviewFolder(folder.id); }}><Eye size={15} /></button>
+          <button title={t('actions.edit')} onClick={(event) => { event.stopPropagation(); onEdit('course_folders', folder); }}><Pencil size={15} /></button>
+          <button title={t('actions.delete')} onClick={(event) => { event.stopPropagation(); onDelete('course_folders', folder.id, folder.name); }}><Trash2 size={15} /></button>
         </div>
       </article>
     </div>;
@@ -1246,7 +1518,7 @@ function CourseList({
         <button className="small-button" onClick={onAddFolder}>
           <Plus size={15} /> {t('library.newFolder')}
         </button>
-        <button className="small-button" onClick={onOrganize}>
+        <button className="small-button organize-button" onClick={onOrganize}>
           <ArrowUpDown size={15} /> {t('actions.organize')}
         </button>
       </div>
@@ -1265,11 +1537,189 @@ function CourseList({
   );
 }
 
+function FolderDetail({
+  folder,
+  chapter,
+  subject,
+  courses,
+  onBack,
+  onOpenCourse,
+  onAddCourse,
+  onOrganize,
+  onEdit,
+  onDelete,
+}: {
+  folder?: CourseFolder;
+  chapter?: Chapter;
+  subject?: Subject;
+  courses: Course[];
+  onBack: () => void;
+  onOpenCourse: (course: Course) => void;
+  onAddCourse: () => void;
+  onOrganize: () => void;
+  onEdit: (entity: Entity, item: Course) => void;
+  onDelete: (entity: Entity, id: number, label: string) => void;
+}) {
+  const { t } = useI18n();
+  if (!folder) return null;
+  const folderCourses = courses.filter((course) => course.folder_id === folder.id).sort(compareFolderCourses);
+  return (
+    <section className="folder-detail">
+      <button className="back-button" onClick={onBack}><ArrowLeft size={17} /> Retour au chapitre</button>
+      <div className="breadcrumbs">
+        <span>{subject?.name}</span><ChevronRight size={15} />
+        <span>{chapter?.name}</span><ChevronRight size={15} />
+        <span>{folder.name}</span>
+      </div>
+      <div className="folder-detail-heading">
+        <div className="folder-detail-title"><span className="folder-detail-icon"><Folder size={23} /></span><div><span className="course-label">DOSSIER DE COURS</span><h1 className="display-title">{folder.name}</h1><p>{folderCourses.length} cours</p></div></div>
+        <div className="folder-detail-actions"><button className="small-button organize-button" onClick={onOrganize}><ArrowUpDown size={15} /> {t('actions.organize')}</button><button className="primary-button" onClick={onAddCourse}><Plus size={17} /> Ajouter un cours</button></div>
+      </div>
+      {folderCourses.length ? (
+        <div className="folder-course-list">
+          {folderCourses.map((course) => (
+            <article className="folder-course-row" key={course.id}>
+              <button className="folder-course-open" onClick={() => onOpenCourse(course)}>
+                <span className="module-row-icon"><FileText size={18} /></span>
+                <span><strong>{course.title}</strong><small>{course.source_type === "demo" ? "Cours de démonstration" : "Cours"}</small></span>
+                <ChevronRight size={17} />
+              </button>
+              <div className="row-actions">
+                <button title="Modifier" aria-label="Modifier" onClick={(event) => { event.stopPropagation(); onEdit("courses", course); }}><Pencil size={15} /></button>
+                <button title="Supprimer" aria-label="Supprimer" onClick={(event) => { event.stopPropagation(); onDelete("courses", course.id, course.title); }}><Trash2 size={15} /></button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">Ce dossier ne contient aucun cours.</div>
+      )}
+    </section>
+  );
+}
+
+function FolderPreview({
+  folder,
+  courses,
+  onClose,
+  onOpenCourse,
+}: {
+  folder?: CourseFolder;
+  courses: Course[];
+  onClose: () => void;
+  onOpenCourse: (course: Course) => void;
+}) {
+  if (!folder) return null;
+  const folderCourses = courses.filter((course) => course.folder_id === folder.id).sort(compareFolderCourses);
+  return (
+    <div className="modal-backdrop folder-preview-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="folder-preview" role="dialog" aria-modal="true" aria-labelledby="folder-preview-title">
+        <div className="folder-preview-head">
+          <div className="folder-preview-title"><span className="folder-detail-icon"><Folder size={20} /></span><div><span className="course-label">DOSSIER DE COURS</span><h2 id="folder-preview-title">{folder.name}</h2></div></div>
+          <button className="close-button" onClick={onClose} aria-label="Fermer"><X size={18} /></button>
+        </div>
+        <p className="folder-preview-count">{folderCourses.length} cours</p>
+        {folderCourses.length ? (
+          <div className="folder-preview-list">
+            {folderCourses.map((course) => (
+              <button className="folder-preview-row" key={course.id} onClick={() => onOpenCourse(course)}>
+                <FileText size={17} /><span>{course.title}</span><ChevronRight size={16} />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="folder-preview-empty">Ce dossier ne contient aucun cours.</div>
+        )}
+        <div className="folder-preview-actions"><button className="secondary-button" onClick={onClose}>Fermer</button></div>
+      </section>
+    </div>
+  );
+}
+
+function FolderCourseAddModal({
+  folder,
+  courses,
+  onClose,
+  onCreate,
+  onAttach,
+  onError,
+}: {
+  folder?: CourseFolder;
+  courses: Course[];
+  onClose: () => void;
+  onCreate: () => void;
+  onAttach: (folder: CourseFolder, courses: Course[]) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [mode, setMode] = useState<"choice" | "existing">("choice");
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, saving]);
+  if (!folder) return null;
+  const availableCourses = courses.filter((course) => course.chapter_id === folder.chapter_id && course.folder_id !== folder.id);
+  const toggleCourse = (courseId: number) => {
+    setSelectedIds((current) => current.includes(courseId) ? current.filter((id) => id !== courseId) : [...current, courseId]);
+  };
+  const attach = async () => {
+    if (!selectedIds.length) return;
+    setSaving(true);
+    try {
+      await onAttach(folder, availableCourses.filter((course) => selectedIds.includes(course.id)));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Impossible d’ajouter le cours.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !saving && onClose()}>
+      <section className="folder-add-modal" role="dialog" aria-modal="true" aria-labelledby="folder-add-title">
+        <div className="modal-head">
+          <div><span className="section-kicker">DOSSIER DE COURS</span><h2 id="folder-add-title">Ajouter un cours</h2></div>
+          <button className="close-button" onClick={onClose} disabled={saving} aria-label="Fermer"><X size={18} /></button>
+        </div>
+        {mode === "choice" ? (
+          <div className="folder-add-options">
+            <button className="folder-add-option" onClick={() => setMode("existing")}>
+              <span className="module-action-icon"><FileText size={19} /></span><span><strong>Ajouter un cours existant</strong><small>Rattacher un cours déjà présent dans ce chapitre</small></span><ChevronRight size={17} />
+            </button>
+            <button className="folder-add-option" onClick={onCreate}>
+              <span className="module-action-icon"><Plus size={19} /></span><span><strong>Créer un nouveau cours</strong><small>Ouvrir l’éditeur dans ce dossier</small></span><ChevronRight size={17} />
+            </button>
+          </div>
+        ) : (
+          <>
+            <p className="folder-add-intro">Sélectionne les cours du chapitre à ajouter à « {folder.name} ».</p>
+            {availableCourses.length ? (
+              <div className="folder-existing-list">
+                {availableCourses.map((course) => (
+                  <label className="folder-existing-option" key={course.id}>
+                    <input type="checkbox" checked={selectedIds.includes(course.id)} onChange={() => toggleCourse(course.id)} />
+                    <span><strong>{course.title}</strong><small>{course.folder_id === null ? "Cours directement dans le chapitre" : "Cours d’un autre dossier"}</small></span>
+                  </label>
+                ))}
+              </div>
+            ) : <div className="folder-add-empty">Aucun autre cours disponible dans ce chapitre.</div>}
+            <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>Annuler</button><button type="button" className="primary-button" onClick={() => void attach()} disabled={!selectedIds.length || saving}>{saving ? "Ajout..." : "Ajouter"}</button></div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function CourseDetail({
   course,
   subjects,
   chapters,
   onBack,
+  onStudy,
   onEdit,
   onDelete,
   onMoved,
@@ -1278,6 +1728,7 @@ function CourseDetail({
   subjects: Subject[];
   chapters: Chapter[];
   onBack: () => void;
+  onStudy: () => void;
   onEdit: (course: Course) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
   onMoved: () => Promise<void>;
@@ -1319,13 +1770,16 @@ function CourseDetail({
       <div className="detail-header">
         <div>
           <span className="course-label">COURS · {course.source_type}</span>
-          <h1>{course.title}</h1>
+          <h1 className="display-title">{course.title}</h1>
           <p>
             {subject?.name} · {chapter?.name}
           </p>
         </div>
       </div>
       <div className="detail-actions">
+        <button className="primary-button" onClick={onStudy}>
+          <BrainCircuit size={16} /> Étudier
+        </button>
         <button className="primary-button" onClick={() => onEdit(course)}>
           <Pencil size={16} /> {t('actions.edit')}
         </button>
@@ -1412,6 +1866,7 @@ function Editor({
   const item = modal.item;
   const isEdit = Boolean(item);
   const entity = modal.entity;
+  const folderContextLocked = entity === "courses" && modal.folderId !== undefined;
   const [name, setName] = useState(
     item && "name" in item
       ? item.name
@@ -1447,9 +1902,9 @@ function Editor({
   const [sourceType, setSourceType] = useState(
     item && "source_type" in item ? item.source_type : "manual",
   );
-  const courseChapters = chapters.filter(
-    (chapter) => chapter.subject_id === courseSubjectId,
-  );
+  const courseChapters = chapters
+    .filter((chapter) => chapter.subject_id === courseSubjectId)
+    .sort(comparePositionedItems);
   const title = isEdit ? t('actions.edit') : t('actions.add');
   const importFile = async (file: File) => {
     try {
@@ -1492,9 +1947,12 @@ function Editor({
                 : content,
             source_type: sourceType,
           };
-          const savedCourse = isEdit
+          let savedCourse = isEdit
             ? await api.updateCourse(item as Course, fields)
-            : await api.createCourse(fields);
+            : await api.createCourse(folderContextLocked ? { ...fields, folder_id: null } : fields);
+          if (!isEdit && folderContextLocked && modal.folderId !== null && modal.folderId !== undefined) {
+            savedCourse = await api.appendCourseToFolder(savedCourse, modal.folderId);
+          }
           await onSaved(savedCourse);
       }
     } catch (err) {
@@ -1531,6 +1989,7 @@ function Editor({
               {t('editor.subject')}
               <select
                 value={courseSubjectId}
+                disabled={folderContextLocked}
                 onChange={(event) => {
                   const next = Number(event.target.value);
                   setCourseSubjectId(next);
@@ -1550,6 +2009,7 @@ function Editor({
               <select
                 required
                 value={parentId}
+                disabled={folderContextLocked}
                 onChange={(event) => setParentId(Number(event.target.value))}
               >
                 {courseChapters.map((chapter) => (
@@ -1563,6 +2023,7 @@ function Editor({
               {t('editor.folder')}
               <select
                 value={folderId ?? ""}
+                disabled={folderContextLocked}
                 onChange={(event) => setFolderId(event.target.value ? Number(event.target.value) : null)}
               >
                 <option value="">{t('editor.noFolder')}</option>

@@ -115,11 +115,20 @@ async function loadSubjects(): Promise<Subject[]> {
   const user = await getAuthenticatedUser()
   const { data, error } = await supabase
     .from('subjects')
-    .select('id, user_id, name, description, color, icon, created_at, updated_at')
+    .select('id, user_id, name, description, color, icon, position, created_at, updated_at')
     .eq('user_id', user.id)
+    .order('position', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
   if (error) throwSupabaseError('subjects', 'select', error)
   return (data ?? []) as Subject[]
+}
+
+async function reorderSubjects(ids: readonly number[]): Promise<void> {
+  const { error } = await supabase.rpc('reorder_subjects', {
+    p_items: ids.map((id) => ({ id })),
+  })
+  if (error) throwSupabaseError('subjects', 'reorder', error)
 }
 
 async function createSubject(fields: SubjectFields): Promise<Subject> {
@@ -147,11 +156,25 @@ async function deleteSubject(id: number): Promise<void> {
 
 async function getChapters(subjectId?: number): Promise<Chapter[]> {
   const user = await getAuthenticatedUser()
-  let query = supabase.from('chapters').select('id, user_id, subject_id, name, description, created_at, updated_at').eq('user_id', user.id).order('created_at', { ascending: true })
+  let query = supabase
+    .from('chapters')
+    .select('id, user_id, subject_id, name, description, position, created_at, updated_at')
+    .eq('user_id', user.id)
+    .order('position', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
   if (subjectId !== undefined) query = query.eq('subject_id', subjectId)
   const { data, error } = await query
   if (error) throwSupabaseError('chapters', 'select', error)
   return (data ?? []) as Chapter[]
+}
+
+async function reorderChapters(subjectId: number, ids: readonly number[]): Promise<void> {
+  const { error } = await supabase.rpc('reorder_chapters', {
+    p_subject_id: subjectId,
+    p_items: ids.map((id) => ({ id })),
+  })
+  if (error) throwSupabaseError('chapters', 'reorder', error)
 }
 
 async function createChapter(fields: ChapterFields): Promise<Chapter> {
@@ -203,9 +226,44 @@ async function deleteCourseFolder(id: number): Promise<void> {
 
 async function loadCourses(): Promise<Course[]> {
   const user = await getAuthenticatedUser()
-  const { data, error } = await supabase.from('courses').select('id, user_id, chapter_id, folder_id, title, content, original_content, source_type, created_at, updated_at').eq('user_id', user.id).order('created_at', { ascending: true })
-  if (error) throwSupabaseError('courses', 'select', error)
-  return (data ?? []) as Course[]
+  const selectWithFolderPosition = 'id, user_id, chapter_id, folder_id, folder_position, title, content, original_content, source_type, created_at, updated_at'
+  const selectLegacy = 'id, user_id, chapter_id, folder_id, title, content, original_content, source_type, created_at, updated_at'
+  const firstQuery = await supabase.from('courses').select(selectWithFolderPosition).eq('user_id', user.id).order('created_at', { ascending: true })
+  if (!firstQuery.error) return (firstQuery.data ?? []) as Course[]
+  if (firstQuery.error.code !== '42703' && !firstQuery.error.message.includes('folder_position')) {
+    throwSupabaseError('courses', 'select', firstQuery.error)
+  }
+  const legacyQuery = await supabase.from('courses').select(selectLegacy).eq('user_id', user.id).order('created_at', { ascending: true })
+  if (legacyQuery.error) throwSupabaseError('courses', 'select', legacyQuery.error)
+  return (legacyQuery.data ?? []).map((course) => ({ ...course, folder_position: null })) as Course[]
+}
+
+async function reorderFolderCourses(folderId: number, ids: readonly number[]): Promise<void> {
+  const { error } = await supabase.rpc('reorder_folder_courses', {
+    p_folder_id: folderId,
+    p_items: ids.map((id) => ({ id })),
+  })
+  if (error) throwSupabaseError('courses', 'reorder folder', error)
+}
+
+async function appendCourseToFolder(course: Course, folderId: number): Promise<Course> {
+  const { error } = await supabase.rpc('append_course_to_folder', {
+    p_course_id: course.id,
+    p_folder_id: folderId,
+  })
+  if (!error) return { ...course, folder_id: folderId, folder_position: null }
+  if (error.code !== '42883' && error.code !== '42703' && !error.message.includes('append_course_to_folder')) {
+    throwSupabaseError('courses', 'append to folder', error)
+  }
+  const updated = await updateCourse(course, {
+    chapter_id: course.chapter_id,
+    folder_id: folderId,
+    title: course.title,
+    content: course.content,
+    original_content: course.original_content,
+    source_type: course.source_type,
+  })
+  return { ...updated, folder_position: null }
 }
 
 async function createCourse(fields: CourseFields): Promise<Course> {
@@ -245,10 +303,12 @@ export const api = {
   createChapterItem,
   deleteChapterItem,
   subjects: loadSubjects,
+  reorderSubjects,
   createSubject,
   updateSubject,
   deleteSubject,
   getChapters,
+  reorderChapters,
   createChapter,
   updateChapter,
   deleteChapter,
@@ -257,6 +317,8 @@ export const api = {
   updateCourseFolder,
   deleteCourseFolder,
   courses: loadCourses,
+  reorderFolderCourses,
+  appendCourseToFolder,
   createCourse,
   updateCourse,
   deleteCourse,
