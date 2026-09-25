@@ -6,7 +6,7 @@ import {
   ChevronRight,
   CircleHelp,
   FileText,
-  FolderTree,
+  Folder,
   LayoutDashboard,
   LibraryBig,
   ListTree,
@@ -16,7 +16,6 @@ import {
   Plus,
   Search,
   Settings,
-  Star,
   Sun,
   Target,
   Trash2,
@@ -24,6 +23,8 @@ import {
   X,
   BrainCircuit,
   Bell,
+  ArrowUpDown,
+  GripVertical,
   MoveRight,
   Upload,
 } from "lucide-react";
@@ -34,10 +35,9 @@ import DOMPurify from "dompurify";
 import type {
   Chapter,
   Course,
+  CourseFolder,
   Entity,
-  LegacyChapter,
   Subject,
-  Theme,
 } from "./types";
 import { useAuth } from "./contexts/AuthContext";
 import AuthPage from "./pages/AuthPage";
@@ -49,9 +49,21 @@ type Page = "home" | "courses" | "settings" | "placeholder";
 type ThemeMode = "light" | "dark" | "system";
 type ModalState = {
   entity: Entity;
-  item?: Subject | Theme | Chapter | Course;
+  item?: Subject | Chapter | CourseFolder | Course;
   parentId?: number;
+  folderId?: number | null;
 } | null;
+type OrganizationEntry = {
+  key: string;
+  kind: "subject" | "chapter" | "folder" | "course";
+  id: number;
+  label: string;
+  secondary?: string;
+};
+type OrganizationScope =
+  | { kind: "subjects" }
+  | { kind: "chapters"; subjectId: number }
+  | { kind: "chapter-items"; chapterId: number };
 
 const navItems = [
   { id: "home", label: "sidebar.home", icon: LayoutDashboard },
@@ -64,6 +76,28 @@ const navItems = [
   { id: "settings", label: "sidebar.settings", icon: Settings },
 ] as const;
 
+function organizationEntries(
+  scope: OrganizationScope,
+  subjects: Subject[],
+  chapters: Chapter[],
+  folders: CourseFolder[],
+  courses: Course[],
+  localItemOrder?: string[],
+): OrganizationEntry[] {
+  if (scope.kind === "subjects") {
+    return subjects.map((subject) => ({ key: `subject:${subject.id}`, kind: "subject", id: subject.id, label: subject.name }));
+  }
+  if (scope.kind === "chapters") {
+    return chapters.filter((chapter) => chapter.subject_id === scope.subjectId).map((chapter) => ({ key: `chapter:${chapter.id}`, kind: "chapter", id: chapter.id, label: chapter.name }));
+  }
+  const entries = [
+    ...folders.filter((folder) => folder.chapter_id === scope.chapterId).map((folder) => ({ key: `folder:${folder.id}`, kind: "folder" as const, id: folder.id, label: folder.name, secondary: "Dossier de cours" })),
+    ...courses.filter((course) => course.chapter_id === scope.chapterId).map((course) => ({ key: `course:${course.id}`, kind: "course" as const, id: course.id, label: course.title, secondary: "Cours" })),
+  ];
+  const order = new Map((localItemOrder ?? []).map((key, index) => [key, index]));
+  return entries.sort((first, second) => (order.get(first.key) ?? Number.MAX_SAFE_INTEGER) - (order.get(second.key) ?? Number.MAX_SAFE_INTEGER));
+}
+
 function App() {
   const {
     user,
@@ -75,9 +109,8 @@ function App() {
   const { t } = useI18n();
   const [page, setPage] = useState<Page>("home");
   const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [themes, setThemes] = useState<Theme[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [legacyChapters, setLegacyChapters] = useState<LegacyChapter[]>([]);
+  const [courseFolders, setCourseFolders] = useState<CourseFolder[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
   const [themeMode, setThemeMode] = useState<ThemeMode>(
     () =>
@@ -86,9 +119,11 @@ function App() {
   );
   const [search, setSearch] = useState("");
   const [selectedSubject, setSelectedSubject] = useState<number | null>(null);
-  const [selectedTheme, setSelectedTheme] = useState<number | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+  const [organization, setOrganization] = useState<OrganizationScope | null>(null);
+  const [organizationSaving, setOrganizationSaving] = useState(false);
+  const [localChapterItemOrders, setLocalChapterItemOrders] = useState<Record<number, string[]>>({});
   const [modal, setModal] = useState<ModalState>(null);
   const [error, setError] = useState("");
   const handleSignOut = async () => {
@@ -101,23 +136,16 @@ function App() {
 
   const loadData = async () => {
     try {
-      const [
-        nextSubjects,
-        nextThemes,
-        nextChapters,
-        nextLegacyChapters,
-        nextCourses,
-      ] = await Promise.all([
-        api.subjects(),
-        api.getThemes(),
+      const nextSubjects = await api.subjects();
+      setSubjects(nextSubjects);
+
+      const [nextChapters, nextCourseFolders, nextCourses] = await Promise.all([
         api.getChapters(),
-        api.legacyChaptersForCourses(),
+        api.courseFolders(),
         api.courses(),
       ]);
-      setSubjects(nextSubjects);
-      setThemes(nextThemes);
       setChapters(nextChapters);
-      setLegacyChapters(nextLegacyChapters);
+      setCourseFolders(nextCourseFolders);
       setCourses(nextCourses);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("errors.server"));
@@ -177,13 +205,12 @@ function App() {
 
   const counts = {
     subjects: subjects.length,
-    themes: themes.length,
     chapters: chapters.length,
+    folders: courseFolders.length,
     courses: courses.length,
   };
   const selected = {
     subject: subjects.find((item) => item.id === selectedSubject),
-    theme: themes.find((item) => item.id === selectedTheme),
     chapter: chapters.find((item) => item.id === selectedChapter),
     course: courses.find((item) => item.id === selectedCourseId),
   };
@@ -201,14 +228,6 @@ function App() {
             ? null
             : current,
         );
-      } else if (entity === "themes") {
-        await api.deleteTheme(id);
-        setThemes((current) => current.filter((theme) => theme.id !== id));
-        setModal((current) =>
-          current?.entity === "themes" && current.item?.id === id
-            ? null
-            : current,
-        );
       } else if (entity === "chapters") {
         await api.deleteChapter(id);
         setChapters((current) =>
@@ -219,12 +238,15 @@ function App() {
             ? null
             : current,
         );
+      } else if (entity === "course_folders") {
+        await api.deleteCourseFolder(id);
+        setCourseFolders((current) => current.filter((folder) => folder.id !== id));
+        setCourses((current) => current.map((course) => course.folder_id === id ? { ...course, folder_id: null } : course));
       } else {
-        await api.remove(entity, id);
+        await api.deleteCourse(id);
         await loadData();
       }
       setSelectedSubject(null);
-      setSelectedTheme(null);
       setSelectedChapter(null);
       setSelectedCourseId(null);
     } catch (err) {
@@ -232,41 +254,86 @@ function App() {
     }
   };
 
+  const removeSubject = async (subject: Subject) => {
+    try {
+      await api.deleteSubject(subject.id);
+      setSubjects((current) => current.filter((item) => item.id !== subject.id));
+      const deletedChapterIds = new Set(
+        chapters.filter((chapter) => chapter.subject_id === subject.id).map((chapter) => chapter.id),
+      );
+      const deletedFolderIds = new Set(
+        courseFolders.filter((folder) => deletedChapterIds.has(folder.chapter_id)).map((folder) => folder.id),
+      );
+      setChapters((current) => current.filter((chapter) => !deletedChapterIds.has(chapter.id)));
+      setCourseFolders((current) => current.filter((folder) => !deletedFolderIds.has(folder.id)));
+      setCourses((current) => current.filter((course) => !deletedChapterIds.has(course.chapter_id)));
+      setModal(null);
+      setSelectedSubject(null);
+      setSelectedChapter(null);
+      setSelectedCourseId(null);
+      setPage("home");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('errors.delete'));
+    }
+  };
+
+  const beginOrganization = (scope: OrganizationScope) => {
+    setOrganization(scope);
+  };
+
+  const finishOrganization = async (scope: OrganizationScope, entries: OrganizationEntry[]) => {
+    if (scope.kind === "subjects") {
+      const byId = new Map(subjects.map((subject) => [subject.id, subject]));
+      setSubjects(entries.map((entry) => byId.get(entry.id)).filter((subject): subject is Subject => Boolean(subject)));
+      setOrganization(null);
+      return;
+    }
+
+    if (scope.kind === "chapters") {
+      const orderedIds = entries.map((entry) => entry.id);
+      const selectedIds = new Set(orderedIds);
+      const ordered = entries.map((entry) => chapters.find((chapter) => chapter.id === entry.id)).filter((chapter): chapter is Chapter => Boolean(chapter));
+      let cursor = 0;
+      setChapters((current) => current.map((chapter) => chapter.subject_id === scope.subjectId && selectedIds.has(chapter.id) ? ordered[cursor++] : chapter));
+      setOrganization(null);
+      return;
+    }
+
+    const orderedKeys = entries.map((entry) => entry.key);
+    const seen = new Set<string>();
+    const hasDuplicate = orderedKeys.some((key) => {
+      if (seen.has(key)) return true;
+      seen.add(key);
+      return false;
+    });
+
+    if (hasDuplicate) {
+      setError('La liste d’organisation contient des doublons.');
+      return;
+    }
+
+    try {
+      setError("");
+      setOrganizationSaving(true);
+      await api.reorderChapterItems(scope.chapterId, orderedKeys);
+      setLocalChapterItemOrders((current) => ({ ...current, [scope.chapterId]: orderedKeys }));
+      setOrganization(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'La sauvegarde de l’ordre a échoué.');
+    } finally {
+      setOrganizationSaving(false);
+    }
+  };
+
   const selectSubject = (id: number) => {
     setSelectedSubject(id > 0 ? id : null);
-    setSelectedTheme(null);
     setSelectedChapter(null);
     setPage("courses");
-  };
-  const selectTheme = (id: number) => {
-    setSelectedTheme(id);
-    setSelectedChapter(null);
   };
   const selectChapter = (id: number) => setSelectedChapter(id);
   const openCourse = (course: Course) => {
     setSelectedCourseId(course.id);
     setPage("courses");
-  };
-  const toggleFavorite = async (course: Course) => {
-    try {
-      await api.update<Course>("courses", course.id, {
-        chapter_id: course.chapter_id,
-        title: course.title,
-        content: course.content,
-        original_content: course.original_content,
-        source_type: course.source_type,
-        original_filename: course.original_filename,
-        favorite: !course.favorite,
-        order: course.order,
-      });
-      await loadData();
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : t('errors.save'),
-      );
-    }
   };
 
   return (
@@ -336,10 +403,10 @@ function App() {
               <span>{user.email}</span>
             </div>
             <button
-              className="signout-button"
-              title={t('top.logout')}
-              aria-label={t('top.logout')}
-              onClick={() => void handleSignOut()}
+              className="profile-button"
+              title={t('settings.profile')}
+              aria-label={t('settings.profile')}
+              onClick={() => setPage("settings")}
             >
               <MoreHorizontal size={18} />
             </button>
@@ -388,8 +455,9 @@ function App() {
             </button>
             <button
               className="top-avatar"
-              aria-label={t('top.logout')}
-              onClick={() => void handleSignOut()}
+              aria-label={t('settings.profile')}
+              title={t('settings.profile')}
+              onClick={() => setPage("settings")}
             >
               {(user.email?.[0] ?? "A").toUpperCase()}
             </button>
@@ -404,17 +472,24 @@ function App() {
               </button>
             </div>
           )}
-          {search.trim() ? (
+          {organization ? (
+            <OrganizationView
+              scope={organization}
+              items={organizationEntries(organization, subjects, chapters, courseFolders, courses, organization.kind === "chapter-items" ? localChapterItemOrders[organization.chapterId] : undefined)}
+              isSaving={organizationSaving}
+              onCancel={() => !organizationSaving && setOrganization(null)}
+              onFinish={(items) => void finishOrganization(organization, items)}
+            />
+          ) : search.trim() ? (
             <SearchResults
               query={search}
               subjects={subjects}
-              themes={themes}
               chapters={chapters}
               courses={courses}
               onOpen={openCourse}
             />
           ) : null}
-          {!search.trim() && page === "home" && (
+          {!organization && !search.trim() && page === "home" && (
             <Dashboard
               displayName={
                 profile?.display_name?.trim() ||
@@ -423,28 +498,26 @@ function App() {
                 t('settings.profile')
               }
               counts={counts}
-              subjects={filteredSubjects}
-              themes={themes}
+              subjects={subjects}
               chapters={chapters}
               courses={courses}
               onOpenSubject={selectSubject}
+              onEditSubject={(subject) => setModal({ entity: "subjects", item: subject })}
+              onOrganize={() => beginOrganization({ kind: "subjects" })}
               onOpenCourse={openCourse}
               onAdd={() => setModal({ entity: "subjects" })}
             />
           )}
-          {!search.trim() &&
+          {!organization && !search.trim() &&
             page === "courses" &&
             (selected.course ? (
               <CourseDetail
                 course={selected.course}
                 subjects={subjects}
-                themes={themes}
                 chapters={chapters}
-                legacyChapters={legacyChapters}
                 onBack={() => setSelectedCourseId(null)}
                 onEdit={(item) => setModal({ entity: "courses", item })}
                 onDelete={remove}
-                onFavorite={toggleFavorite}
                 onMoved={async () => {
                   setSelectedCourseId(null);
                   await loadData();
@@ -453,24 +526,24 @@ function App() {
             ) : (
               <CoursesView
                 subjects={subjects}
-                themes={themes}
                 chapters={chapters}
-                legacyChapters={legacyChapters}
+                courseFolders={courseFolders}
                 courses={courses}
                 selected={selected}
                 selectedSubject={selectedSubject}
-                selectedTheme={selectedTheme}
                 selectedChapter={selectedChapter}
                 onSubject={selectSubject}
-                onTheme={selectTheme}
                 onChapter={selectChapter}
                 onCourse={openCourse}
                 onAdd={setModal}
                 onEdit={(entity, item) => setModal({ entity, item })}
                 onDelete={remove}
+                onOrganizeSubjects={() => beginOrganization({ kind: "subjects" })}
+                onOrganizeChapters={(subjectId) => beginOrganization({ kind: "chapters", subjectId })}
+                onOrganizeItems={(chapterId) => beginOrganization({ kind: "chapter-items", chapterId })}
               />
             ))}
-          {!search.trim() && page === "settings" && (
+          {!organization && !search.trim() && page === "settings" && (
             <SettingsPage
               user={user}
               initialDark={dark}
@@ -478,7 +551,7 @@ function App() {
               onSignOut={handleSignOut}
             />
           )}
-          {!search.trim() && page === "placeholder" && <Placeholder />}
+          {!organization && !search.trim() && page === "placeholder" && <Placeholder />}
         </div>
       </main>
       <nav className="mobile-nav">
@@ -513,6 +586,7 @@ function App() {
           <SubjectEditor
             item={modal.item && "color" in modal.item ? modal.item : undefined}
             onClose={() => setModal(null)}
+            onDelete={removeSubject}
             onSaved={async (savedSubject) => {
               setSubjects((current) => {
                 const alreadyExists = current.some(
@@ -523,9 +597,7 @@ function App() {
                       subject.id === savedSubject.id ? savedSubject : subject,
                     )
                   : [...current, savedSubject];
-                return next.sort((first, second) =>
-                  first.created_at.localeCompare(second.created_at),
-                );
+                return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
               });
               setModal(null);
             }}
@@ -535,36 +607,12 @@ function App() {
           <Editor
             modal={modal}
             subjects={subjects}
-            themes={themes}
             chapters={chapters}
-            legacyChapters={legacyChapters}
+            courseFolders={courseFolders}
             onClose={() => setModal(null)}
             onSaved={async (savedItem) => {
               setModal(null);
-              if (
-                modal.entity === "themes" &&
-                savedItem &&
-                "subject_id" in savedItem
-              ) {
-                setThemes((current) => {
-                  const alreadyExists = current.some(
-                    (theme) => theme.id === savedItem.id,
-                  );
-                  const next = alreadyExists
-                    ? current.map((theme) =>
-                        theme.id === savedItem.id ? savedItem : theme,
-                      )
-                    : [...current, savedItem];
-                  return next.sort(
-                    (first, second) =>
-                      (first.position ?? 0) - (second.position ?? 0),
-                  );
-                });
-              } else if (
-                modal.entity === "chapters" &&
-                savedItem &&
-                "theme_id" in savedItem
-              ) {
+              if (modal.entity === "chapters" && savedItem && "subject_id" in savedItem) {
                 setChapters((current) => {
                   const alreadyExists = current.some(
                     (chapter) => chapter.id === savedItem.id,
@@ -574,12 +622,26 @@ function App() {
                         chapter.id === savedItem.id ? savedItem : chapter,
                       )
                     : [...current, savedItem];
-                  return next.sort(
-                    (first, second) =>
-                      (first.position ?? 0) - (second.position ?? 0),
-                  );
+                  return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
                 });
-              } else await loadData();
+              } else if (modal.entity === "course_folders" && savedItem && "name" in savedItem && !("title" in savedItem)) {
+                const savedFolder = savedItem as CourseFolder;
+                setCourseFolders((current) => {
+                  const next = current.some((folder) => folder.id === savedFolder.id)
+                    ? current.map((folder) => folder.id === savedFolder.id ? savedFolder : folder)
+                    : [...current, savedFolder];
+                  return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
+                });
+              } else if (modal.entity === "courses" && savedItem && "title" in savedItem) {
+                setCourses((current) => {
+                  const next = current.some((course) => course.id === savedItem.id)
+                    ? current.map((course) => course.id === savedItem.id ? savedItem : course)
+                    : [...current, savedItem];
+                  return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
+                });
+              } else {
+                await loadData();
+              }
             }}
             onError={setError}
           />
@@ -591,14 +653,12 @@ function App() {
 function SearchResults({
   query,
   subjects,
-  themes,
   chapters,
   courses,
   onOpen,
 }: {
   query: string;
   subjects: Subject[];
-  themes: Theme[];
   chapters: Chapter[];
   courses: Course[];
   onOpen: (course: Course) => void;
@@ -607,13 +667,11 @@ function SearchResults({
   const needle = query.toLowerCase();
   const results = courses.filter((course) => {
     const chapter = chapters.find((item) => item.id === course.chapter_id);
-    const theme = themes.find((item) => item.id === chapter?.theme_id);
-    const subject = subjects.find((item) => item.id === theme?.subject_id);
+    const subject = subjects.find((item) => item.id === chapter?.subject_id);
     return [
       course.title,
       course.content,
       chapter?.name,
-      theme?.name,
       subject?.name,
     ].some((value) => value?.toLowerCase().includes(needle));
   });
@@ -634,9 +692,8 @@ function SearchResults({
             const chapter = chapters.find(
               (item) => item.id === course.chapter_id,
             );
-            const theme = themes.find((item) => item.id === chapter?.theme_id);
             const subject = subjects.find(
-              (item) => item.id === theme?.subject_id,
+              (item) => item.id === chapter?.subject_id,
             );
             return (
               <button
@@ -650,7 +707,7 @@ function SearchResults({
                 <span>
                   <strong>{course.title}</strong>
                   <small>
-                    {subject?.name} → {theme?.name} → {chapter?.name}
+                    {subject?.name} → {chapter?.name}
                   </small>
                   <em>
                     {course.content.replace(/<[^>]*>/g, "").slice(0, 180)}
@@ -672,24 +729,94 @@ function SearchResults({
   );
 }
 
+function OrganizationView({
+  scope,
+  items,
+  isSaving,
+  onCancel,
+  onFinish,
+}: {
+  scope: OrganizationScope;
+  items: OrganizationEntry[];
+  isSaving?: boolean;
+  onCancel: () => void;
+  onFinish: (items: OrganizationEntry[]) => void;
+}) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState(items);
+  const [draggedKey, setDraggedKey] = useState<string | null>(null);
+  const title = scope.kind === "subjects"
+    ? t('home.subjects')
+    : scope.kind === "chapters"
+      ? t('library.chapters')
+      : t('library.title');
+  const iconFor = (kind: OrganizationEntry['kind']) => {
+    if (kind === "folder") return <Folder size={18} />;
+    if (kind === "course") return <FileText size={18} />;
+    if (kind === "chapter") return <ListTree size={18} />;
+    return <BookOpen size={18} />;
+  };
+  const moveEntry = (sourceKey: string, targetKey: string) => {
+    if (sourceKey === targetKey) return;
+    const sourceIndex = draft.findIndex((entry) => entry.key === sourceKey);
+    const targetIndex = draft.findIndex((entry) => entry.key === targetKey);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const next = [...draft];
+    const [entry] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, entry);
+    setDraft(next);
+  };
+  return (
+    <section className="organization-page">
+      <div className="eyebrow"><span className="status-dot" /> {t('actions.organize').toUpperCase()}</div>
+      <div className="organization-heading">
+        <div><h1>{title}</h1><p>{t('organization.subtitle')}</p></div>
+        <div className="organization-actions">
+          <button className="secondary-button" onClick={onCancel} disabled={isSaving}>{t('actions.cancel')}</button>
+          <button className="primary-button" onClick={() => onFinish(draft)} disabled={isSaving} aria-busy={isSaving}>{isSaving ? '...' : t('actions.finish')}</button>
+        </div>
+      </div>
+      <div className="organization-list">
+        {draft.length ? draft.map((entry) => (
+          <div
+            className={`organization-row ${draggedKey === entry.key ? "is-dragged" : ""}`}
+            key={entry.key}
+            draggable
+            onDragStart={() => setDraggedKey(entry.key)}
+            onDragEnd={() => setDraggedKey(null)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => { event.preventDefault(); if (draggedKey) moveEntry(draggedKey, entry.key); setDraggedKey(null); }}
+          >
+            <GripVertical className="drag-handle" size={18} />
+            <span className="organization-icon">{iconFor(entry.kind)}</span>
+            <span className="organization-copy"><strong>{entry.label}</strong>{entry.secondary && <small>{entry.secondary}</small>}</span>
+          </div>
+        )) : <div className="empty-state">{t('library.nothing')}</div>}
+      </div>
+    </section>
+  );
+}
+
 function Dashboard({
   displayName,
   counts,
   subjects,
-  themes,
   chapters,
   courses,
   onOpenSubject,
+  onEditSubject,
+  onOrganize,
   onOpenCourse,
   onAdd,
 }: {
   displayName: string;
   counts: Record<string, number>;
   subjects: Subject[];
-  themes: Theme[];
   chapters: Chapter[];
   courses: Course[];
   onOpenSubject: (id: number) => void;
+  onEditSubject: (subject: Subject) => void;
+  onOrganize: () => void;
   onOpenCourse: (course: Course) => void;
   onAdd: () => void;
 }) {
@@ -707,22 +834,16 @@ function Dashboard({
           </h1>
           <p>{t('home.subtitle')}</p>
         </div>
-        <button className="primary-button" onClick={onAdd}>
-          <Plus size={17} /> {t('home.newSubject')}
-        </button>
+        <div className="welcome-actions">
+          <button className="secondary-button" onClick={onOrganize}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
+          <button className="primary-button" onClick={onAdd}><Plus size={17} /> {t('home.newSubject')}</button>
+        </div>
       </div>
       <div className="stats-grid">
         {[
           [t('stats.subjects'), counts.subjects, t('stats.subjectsHint'), "subjects"],
-          [t('stats.themes'), counts.themes, t('stats.themesHint'), "themes"],
           [t('stats.chapters'), counts.chapters, t('stats.chaptersHint'), "chapters"],
           [t('stats.courses'), counts.courses, t('stats.coursesHint'), "courses"],
-          [
-            t('stats.favorites'),
-            courses.filter((course) => course.favorite).length,
-            t('stats.favoritesHint'),
-            "favorites",
-          ],
         ].map(([label, value, hint, icon]) => (
           <div className="stat-card" key={label as string}>
             <div className="stat-icon">
@@ -763,29 +884,32 @@ function Dashboard({
               >
                 <SubjectIcon name={subject.icon} size={19} strokeWidth={1.8} />
               </span>
-              <MoreHorizontal size={17} />
+              <span
+                className="subject-menu-button"
+                role="button"
+                tabIndex={0}
+                aria-label={t('actions.editSubject')}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onEditSubject(subject);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onEditSubject(subject);
+                  }
+                }}
+              >
+                <MoreHorizontal size={17} />
+              </span>
             </div>
             <h3>{subject.name}</h3>
             <p>{subject.description || t('home.subjectFallback')}</p>
             <div className="subject-meta">
               <span>
                 <b>
-                  {
-                    themes.filter((item) => item.subject_id === subject.id)
-                      .length
-                  }
-                </b>{" "}
-                thèmes
-              </span>
-              <span>
-                <b>
-                  {
-                    chapters.filter((item) =>
-                      themes
-                        .filter((theme) => theme.subject_id === subject.id)
-                        .some((theme) => theme.id === item.theme_id),
-                    ).length
-                  }
+                  {chapters.filter((item) => item.subject_id === subject.id).length}
                 </b>{" "}
                 chapitres
               </span>
@@ -796,11 +920,7 @@ function Dashboard({
                       chapters.some(
                         (chapter) =>
                           chapter.id === course.chapter_id &&
-                          themes.some(
-                            (theme) =>
-                              theme.id === chapter.theme_id &&
-                              theme.subject_id === subject.id,
-                          ),
+                          chapter.subject_id === subject.id,
                       ),
                     ).length
                   }
@@ -843,7 +963,7 @@ function Dashboard({
               <FileText size={18} />
               <span>
                 <strong>{course.title}</strong>
-                <small>{course.original_filename || "Saisie manuelle"}</small>
+                <small>{course.source_type === "demo" ? t('source.demo') : t('source.manual')}</small>
               </span>
               <ChevronRight size={16} />
             </button>
@@ -857,84 +977,52 @@ function Dashboard({
 }
 
 function StatIcon({ name }: { name: string }) {
-  const icons = {
-    subjects: LibraryBig,
-    themes: FolderTree,
-    chapters: ListTree,
-    courses: BookOpen,
-    favorites: Star,
-  };
+  const icons = { subjects: LibraryBig, chapters: ListTree, courses: BookOpen };
   const Icon = icons[name as keyof typeof icons] ?? BookOpen;
   return <Icon size={20} strokeWidth={1.8} />;
 }
 
-function legacyChapterIdFor(
-  chapter: Chapter | undefined,
-  subjects: Subject[],
-  themes: Theme[],
-  legacyChapters: LegacyChapter[],
-) {
-  if (!chapter) return undefined;
-  const theme = themes.find((item) => item.id === chapter.theme_id);
-  const subject = subjects.find((item) => item.id === theme?.subject_id);
-  return legacyChapters.find(
-    (item) =>
-      item.name === chapter.name &&
-      item.theme_name === theme?.name &&
-      item.subject_name === subject?.name,
-  )?.id;
-}
-
 function CoursesView({
   subjects,
-  themes,
   chapters,
-  legacyChapters,
+  courseFolders,
   courses,
   selected,
   selectedSubject,
-  selectedTheme,
   selectedChapter,
   onSubject,
-  onTheme,
   onChapter,
   onCourse,
   onAdd,
   onEdit,
   onDelete,
+  onOrganizeSubjects,
+  onOrganizeChapters,
+  onOrganizeItems,
 }: {
   subjects: Subject[];
-  themes: Theme[];
   chapters: Chapter[];
-  legacyChapters: LegacyChapter[];
+  courseFolders: CourseFolder[];
   courses: Course[];
-  selected: { subject?: Subject; theme?: Theme; chapter?: Chapter };
+  selected: { subject?: Subject; chapter?: Chapter };
   selectedSubject: number | null;
-  selectedTheme: number | null;
   selectedChapter: number | null;
   onSubject: (id: number) => void;
-  onTheme: (id: number) => void;
   onChapter: (id: number) => void;
   onCourse: (course: Course) => void;
   onAdd: (modal: ModalState) => void;
-  onEdit: (entity: Entity, item: Subject | Theme | Chapter | Course) => void;
+  onEdit: (entity: Entity, item: Subject | Chapter | CourseFolder | Course) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
+  onOrganizeSubjects: () => void;
+  onOrganizeChapters: (subjectId: number) => void;
+  onOrganizeItems: (chapterId: number) => void;
 }) {
   const { t } = useI18n();
-  const visibleThemes = themes.filter(
-    (theme) => theme.subject_id === selectedSubject,
-  );
   const visibleChapters = chapters.filter(
-    (chapter) => chapter.theme_id === selectedTheme,
-  );
-  const legacyChapterId = legacyChapterIdFor(
-    selected.chapter,
-    subjects,
-    themes,
-    legacyChapters,
+    (chapter) => chapter.subject_id === selectedSubject,
   );
   const visibleCourses = courses.filter(
-    (course) => course.chapter_id === legacyChapterId,
+    (course) => course.chapter_id === selectedChapter,
   );
   return (
     <section className="courses-page">
@@ -946,12 +1034,10 @@ function CoursesView({
           <h1>{t('library.title')}</h1>
           <p>{t('library.subtitle')}</p>
         </div>
-        <button
-          className="primary-button"
-          onClick={() => onAdd({ entity: "subjects" })}
-        >
-          <Plus size={17} /> {t('library.add')}
-        </button>
+        <div className="welcome-actions">
+          <button className="secondary-button" onClick={() => selectedChapter ? onOrganizeItems(selectedChapter) : selectedSubject ? onOrganizeChapters(selectedSubject) : onOrganizeSubjects()}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
+          <button className="primary-button" onClick={() => onAdd({ entity: "subjects" })}><Plus size={17} /> {t('library.add')}</button>
+        </div>
       </div>
       <div className="breadcrumbs">
         <button
@@ -966,14 +1052,6 @@ function CoursesView({
             <ChevronRight size={15} />
             <button onClick={() => onSubject(selected.subject!.id)}>
               {selected.subject.name}
-            </button>
-          </>
-        )}
-        {selected.theme && (
-          <>
-            <ChevronRight size={15} />
-            <button onClick={() => onTheme(selected.theme!.id)}>
-              {selected.theme.name}
             </button>
           </>
         )}
@@ -995,17 +1073,6 @@ function CoursesView({
           onEdit={onEdit}
           onDelete={onDelete}
         />
-      ) : !selectedTheme ? (
-        <EntityList
-          title={t('library.themes')}
-          items={visibleThemes}
-          entity="themes"
-          icon="◌"
-          onSelect={onTheme}
-          onAdd={() => onAdd({ entity: "themes", parentId: selectedSubject })}
-          onEdit={onEdit}
-          onDelete={onDelete}
-        />
       ) : !selectedChapter ? (
         <EntityList
           title={t('library.chapters')}
@@ -1013,15 +1080,18 @@ function CoursesView({
           entity="chapters"
           icon="▤"
           onSelect={onChapter}
-          onAdd={() => onAdd({ entity: "chapters", parentId: selectedTheme })}
+          onAdd={() => onAdd({ entity: "chapters", parentId: selectedSubject })}
           onEdit={onEdit}
           onDelete={onDelete}
         />
       ) : selected.chapter ? (
         <CourseList
           courses={visibleCourses}
+          folders={courseFolders.filter((folder) => folder.chapter_id === selectedChapter)}
           chapter={selected.chapter}
-          onAdd={() => onAdd({ entity: "courses", parentId: selectedChapter })}
+          onAdd={(folderId) => onAdd({ entity: "courses", parentId: selectedChapter, folderId })}
+          onAddFolder={() => onAdd({ entity: "course_folders", parentId: selectedChapter })}
+          onOrganize={() => onOrganizeItems(selectedChapter!)}
           onOpen={onCourse}
           onEdit={onEdit}
           onDelete={onDelete}
@@ -1042,12 +1112,12 @@ function EntityList({
   onDelete,
 }: {
   title: string;
-  items: (Subject | Theme | Chapter)[];
+  items: (Subject | Chapter)[];
   entity: Entity;
   icon: string;
   onSelect: (id: number) => void;
-  onAdd: () => void;
-  onEdit: (entity: Entity, item: Subject | Theme | Chapter) => void;
+  onAdd: (folderId?: number) => void;
+  onEdit: (entity: Entity, item: Subject | Chapter) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
 }) {
   const { t } = useI18n();
@@ -1058,7 +1128,7 @@ function EntityList({
           <span className="section-kicker">{t('library.navigation')}</span>
           <h2>{title}</h2>
         </div>
-        <button className="small-button" onClick={onAdd}>
+        <button className="small-button" onClick={() => onAdd()}>
           <Plus size={15} /> {t('actions.add')}
         </button>
       </div>
@@ -1105,20 +1175,64 @@ function EntityList({
 
 function CourseList({
   courses,
+  folders,
   chapter,
   onAdd,
+  onAddFolder,
+  onOrganize,
   onOpen,
   onEdit,
   onDelete,
 }: {
   courses: Course[];
+  folders: CourseFolder[];
   chapter: Chapter;
-  onAdd: () => void;
+  onAdd: (folderId?: number) => void;
+  onAddFolder: () => void;
+  onOrganize: () => void;
   onOpen: (course: Course) => void;
-  onEdit: (entity: Entity, item: Course) => void;
+  onEdit: (entity: Entity, item: Course | CourseFolder) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
 }) {
   const { t } = useI18n();
+  const [expandedFolders, setExpandedFolders] = useState<Set<number>>(() => new Set(folders.map((folder) => folder.id)));
+  const orderedItems = [
+    ...folders.map((item) => ({ type: "folder" as const, item })),
+    ...courses.map((item) => ({ type: "course" as const, item })),
+  ].sort((first, second) => first.item.created_at.localeCompare(second.item.created_at));
+  const renderCourse = (course: Course) => (
+    <article className="course-row" key={`course-${course.id}`}>
+      <button className="course-open" onClick={() => onOpen(course)}>
+        <div className="course-file"><FileText size={20} /></div>
+        <div className="course-copy">
+          <div><span className="course-label">{t('library.title')}</span><h3>{course.title}</h3></div>
+          <p>{course.content.replace(/<[^>]*>/g, "").slice(0, 150) || t('library.nothing')}</p>
+          <small>{t('course.source', { source: course.source_type === "demo" ? t('source.demo') : t('source.manual') })}</small>
+        </div>
+        <ChevronRight className="course-arrow" size={18} />
+      </button>
+      <div className="row-actions">
+        <button title={t('actions.edit')} onClick={() => onEdit("courses", course)}><Pencil size={15} /></button>
+        <button title={t('actions.delete')} onClick={() => onDelete("courses", course.id, course.title)}><Trash2 size={15} /></button>
+      </div>
+    </article>
+  );
+  const renderFolder = (folder: CourseFolder) => {
+    const folderCourses = courses.filter((course) => course.folder_id === folder.id);
+    return <div className="chapter-item-group" key={`folder-${folder.id}`}>
+      <article className="course-row folder-row">
+        <button className="course-open" aria-expanded={expandedFolders.has(folder.id)} onClick={() => setExpandedFolders((current) => { const next = new Set(current); if (next.has(folder.id)) next.delete(folder.id); else next.add(folder.id); return next; })}>
+          <div className="course-file"><Folder size={20} /></div>
+          <div className="course-copy"><div><span className="course-label">{t('library.newFolder')}</span><h3>{folder.name}</h3></div><small>{folderCourses.length} {t('library.coursesInFolder')}</small></div>
+          <ChevronRight className="course-arrow" size={18} />
+        </button>
+        <div className="row-actions">
+          <button title={t('actions.edit')} onClick={() => onEdit('course_folders', folder)}><Pencil size={15} /></button>
+          <button title={t('actions.delete')} onClick={() => onDelete('course_folders', folder.id, folder.name)}><Trash2 size={15} /></button>
+        </div>
+      </article>
+    </div>;
+  };
   return (
     <div className="library-panel">
       <div className="panel-heading">
@@ -1126,11 +1240,17 @@ function CourseList({
           <span className="section-kicker">{t('library.chapter')}</span>
           <h2>{chapter.name}</h2>
         </div>
-        <button className="small-button" onClick={onAdd}>
+        <button className="small-button" onClick={() => onAdd()}>
           <Plus size={15} /> {t('library.newCourse')}
         </button>
+        <button className="small-button" onClick={onAddFolder}>
+          <Plus size={15} /> {t('library.newFolder')}
+        </button>
+        <button className="small-button" onClick={onOrganize}>
+          <ArrowUpDown size={15} /> {t('actions.organize')}
+        </button>
       </div>
-      {courses.length === 0 ? (
+      {orderedItems.length === 0 ? (
         <div className="empty-state">
           <strong>{t('library.noCourses')}</strong>
           <br />
@@ -1138,49 +1258,7 @@ function CourseList({
         </div>
       ) : (
         <div className="course-list">
-          {courses.map((course) => (
-            <article className="course-row" key={course.id}>
-              <button className="course-open" onClick={() => onOpen(course)}>
-                <div className="course-file">
-                  <FileText size={20} />
-                </div>
-                <div className="course-copy">
-                  <div>
-                    <span className="course-label">
-                      {t('library.title')} {String(course.order).padStart(2, "0")}
-                    </span>
-                    <h3>{course.title}</h3>
-                  </div>
-                  <p>
-                    {course.content.replace(/<[^>]*>/g, "").slice(0, 150) ||
-                      t('library.nothing')}
-                  </p>
-                  <small>
-                    {t('course.source', { source: '' })}{" "}
-                    {course.original_filename ||
-                      (course.source_type === "demo"
-                        ? t('source.demo')
-                        : t('source.manual'))}
-                  </small>
-                </div>
-                <ChevronRight className="course-arrow" size={18} />
-              </button>
-              <div className="row-actions">
-                <button
-                  title={t('actions.edit')}
-                  onClick={() => onEdit("courses", course)}
-                >
-                  <Pencil size={15} />
-                </button>
-                <button
-                  title={t('actions.delete')}
-                  onClick={() => onDelete("courses", course.id, course.title)}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </article>
-          ))}
+          {orderedItems.map((entry) => entry.type === "folder" ? renderFolder(entry.item) : renderCourse(entry.item))}
         </div>
       )}
     </div>
@@ -1190,55 +1268,36 @@ function CourseList({
 function CourseDetail({
   course,
   subjects,
-  themes,
   chapters,
-  legacyChapters,
   onBack,
   onEdit,
   onDelete,
-  onFavorite,
   onMoved,
 }: {
   course: Course;
   subjects: Subject[];
-  themes: Theme[];
   chapters: Chapter[];
-  legacyChapters: LegacyChapter[];
   onBack: () => void;
   onEdit: (course: Course) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
-  onFavorite: (course: Course) => void;
   onMoved: () => Promise<void>;
 }) {
   const { t } = useI18n();
-  const legacyChapter = legacyChapters.find(
-    (item) => item.id === course.chapter_id,
-  );
-  const chapter = chapters.find((item) => item.name === legacyChapter?.name);
-  const theme = themes.find(
-    (item) =>
-      item.name === legacyChapter?.theme_name &&
-      item.subject_id ===
-        subjects.find(
-          (subjectItem) => subjectItem.name === legacyChapter?.subject_name,
-        )?.id,
-  );
-  const subject = subjects.find((item) => item.id === theme?.subject_id);
+  const chapter = chapters.find((item) => item.id === course.chapter_id);
+  const subject = subjects.find((item) => item.id === chapter?.subject_id);
   const [moveChapter, setMoveChapter] = useState(course.chapter_id);
   const [moving, setMoving] = useState(false);
   const move = async () => {
     if (moveChapter === course.chapter_id) return;
     setMoving(true);
     try {
-      await api.update<Course>("courses", course.id, {
+      await api.updateCourse(course, {
         chapter_id: moveChapter,
         title: course.title,
         content: course.content,
         original_content: course.original_content,
         source_type: course.source_type,
-        original_filename: course.original_filename,
-        favorite: course.favorite,
-        order: course.order,
+        folder_id: course.folder_id,
       });
       await onMoved();
     } finally {
@@ -1255,28 +1314,16 @@ function CourseDetail({
         <ChevronRight size={15} />
         <span>{subject?.name}</span>
         <ChevronRight size={15} />
-        <span>{theme?.name}</span>
-        <ChevronRight size={15} />
-        <span>{chapter?.name ?? legacyChapter?.name}</span>
+        <span>{chapter?.name}</span>
       </div>
       <div className="detail-header">
         <div>
           <span className="course-label">COURS · {course.source_type}</span>
           <h1>{course.title}</h1>
           <p>
-            {subject?.name} · {theme?.name} ·{" "}
-            {chapter?.name ?? legacyChapter?.name}
+            {subject?.name} · {chapter?.name}
           </p>
         </div>
-        <button
-          className={`favorite-button ${course.favorite ? "is-favorite" : ""}`}
-          aria-label={
-            course.favorite ? t('course.favoriteRemove') : t('course.favoriteAdd')
-          }
-          onClick={() => onFavorite(course)}
-        >
-          <Star size={20} fill={course.favorite ? "currentColor" : "none"} />
-        </button>
       </div>
       <div className="detail-actions">
         <button className="primary-button" onClick={() => onEdit(course)}>
@@ -1303,7 +1350,7 @@ function CourseDetail({
             value={moveChapter}
             onChange={(event) => setMoveChapter(Number(event.target.value))}
           >
-            {legacyChapters.map((item) => (
+            {chapters.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
               </option>
@@ -1327,9 +1374,6 @@ function CourseDetail({
         <span>
           {t('course.updated', { date: new Date(course.updated_at).toLocaleDateString() })}
         </span>
-        {course.original_filename && (
-          <span>{course.original_filename}</span>
-        )}
       </div>
     </section>
   );
@@ -1350,20 +1394,18 @@ function Placeholder() {
 function Editor({
   modal,
   subjects,
-  themes,
-  chapters: _chapters,
-  legacyChapters,
+  chapters,
+  courseFolders,
   onClose,
   onSaved,
   onError,
 }: {
   modal: NonNullable<ModalState>;
   subjects: Subject[];
-  themes: Theme[];
   chapters: Chapter[];
-  legacyChapters: LegacyChapter[];
+  courseFolders: CourseFolder[];
   onClose: () => void;
-  onSaved: (item?: Theme | Chapter) => Promise<void>;
+  onSaved: (item?: Chapter | CourseFolder | Course) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const { t } = useI18n();
@@ -1387,70 +1429,33 @@ function Editor({
     modal.parentId ??
       (item && "subject_id" in item
         ? item.subject_id
-        : item && "theme_id" in item
-          ? item.theme_id
-          : item && "chapter_id" in item
+        : item && "chapter_id" in item
             ? item.chapter_id
             : subjects[0]?.id),
   );
   const [courseSubjectId, setCourseSubjectId] = useState(
     item && "chapter_id" in item
-      ? (subjects.find(
-          (subject) =>
-            subject.name ===
-            legacyChapters.find((chapter) => chapter.id === item.chapter_id)
-              ?.subject_name,
-        )?.id ??
-          subjects[0]?.id ??
-          0)
+      ? chapters.find((chapter) => chapter.id === item.chapter_id)?.subject_id ??
+        subjects[0]?.id ??
+        0
       : (subjects[0]?.id ?? 0),
   );
-  const [courseThemeId, setCourseThemeId] = useState(
-    item && "chapter_id" in item
-      ? (themes.find(
-          (theme) =>
-            theme.name ===
-              legacyChapters.find((chapter) => chapter.id === item.chapter_id)
-                ?.theme_name &&
-            theme.subject_id ===
-              subjects.find(
-                (subject) =>
-                  subject.name ===
-                  legacyChapters.find(
-                    (chapter) => chapter.id === item.chapter_id,
-                  )?.subject_name,
-              )?.id,
-        )?.id ??
-          themes[0]?.id ??
-          0)
-      : (themes[0]?.id ?? 0),
+  const [folderId, setFolderId] = useState<number | null>(
+    modal.folderId ?? (item && "folder_id" in item ? item.folder_id : null),
   );
-  const [originalFilename, setOriginalFilename] = useState(
-    item && "original_filename" in item ? item.original_filename : null,
-  );
+  const [importedFilename, setImportedFilename] = useState<string | null>(null);
   const [sourceType, setSourceType] = useState(
     item && "source_type" in item ? item.source_type : "manual",
   );
-  const chapters = legacyChapters;
-  const courseThemes = themes.filter(
-    (theme) => theme.subject_id === courseSubjectId,
+  const courseChapters = chapters.filter(
+    (chapter) => chapter.subject_id === courseSubjectId,
   );
-  const selectedCourseTheme = courseThemes.find(
-    (theme) => theme.id === courseThemeId,
-  ) ?? { name: "" };
-  const courseChapters = legacyChapters.filter(
-    (chapter) =>
-      chapter.subject_name ===
-        subjects.find((subject) => subject.id === courseSubjectId)?.name &&
-      chapter.theme_name === selectedCourseTheme?.name,
-  );
-  const endpoint = entity;
   const title = isEdit ? t('actions.edit') : t('actions.add');
   const importFile = async (file: File) => {
     try {
       const imported = await api.importFile(file);
       setContent(imported.content);
-      setOriginalFilename(imported.filename);
+      setImportedFilename(imported.filename);
       setSourceType(imported.source_type);
     } catch (err) {
       onError(err instanceof Error ? err.message : t('errors.import'));
@@ -1459,49 +1464,38 @@ function Editor({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      if (entity === "themes") {
+      if (entity === "chapters") {
         const fields = {
           subject_id: Number(parentId),
           name: name.trim(),
           description: description.trim() || null,
-          position: isEdit && item && "position" in item ? item.position : 0,
-        };
-        const savedTheme = isEdit
-          ? await api.updateTheme(item as Theme, fields)
-          : await api.createTheme(fields);
-        await onSaved(savedTheme);
-      } else if (entity === "chapters") {
-        const fields = {
-          theme_id: Number(parentId),
-          name: name.trim(),
-          description: description.trim() || null,
-          position: isEdit && item && "position" in item ? item.position : 0,
         };
         const savedChapter = isEdit
           ? await api.updateChapter(item as Chapter, fields)
           : await api.createChapter(fields);
         await onSaved(savedChapter);
-      } else {
-        const body =
-          entity === "subjects"
-            ? { name, description, color: "#1f7a8c", icon: "book" }
-            : {
-                chapter_id: Number(parentId),
-                title: name,
-                content,
-                original_content:
-                  isEdit && item && "original_content" in item
-                    ? item.original_content
-                    : content,
-                source_type: sourceType,
-                original_filename: originalFilename,
-                favorite:
-                  isEdit && item && "favorite" in item ? item.favorite : false,
-                order: isEdit && item && "order" in item ? item.order : 0,
-              };
-        if (isEdit) await api.update(endpoint, item!.id, body);
-        else await api.create(endpoint, body);
-        await onSaved();
+      } else if (entity === "course_folders") {
+        const fields = { chapter_id: Number(parentId), name: name.trim() };
+        const savedFolder = isEdit
+          ? await api.updateCourseFolder(item as CourseFolder, fields)
+          : await api.createCourseFolder(fields);
+        await onSaved(savedFolder);
+      } else if (entity === "courses") {
+          const fields = {
+            chapter_id: Number(parentId),
+            folder_id: folderId,
+            title: name.trim(),
+            content,
+            original_content:
+              isEdit && item && "original_content" in item
+                ? item.original_content
+                : content,
+            source_type: sourceType,
+          };
+          const savedCourse = isEdit
+            ? await api.updateCourse(item as Course, fields)
+            : await api.createCourse(fields);
+          await onSaved(savedCourse);
       }
     } catch (err) {
       onError(
@@ -1522,9 +1516,7 @@ function Editor({
               {title}{" "}
               {entity === "subjects"
                 ? t('editor.labelName')
-                : entity === "themes"
-                  ? t('editor.theme')
-                  : entity === "chapters"
+                : entity === "chapters" || entity === "course_folders"
                     ? t('editor.chapter')
                     : t('editor.labelTitle')}
             </h2>
@@ -1542,40 +1534,13 @@ function Editor({
                 onChange={(event) => {
                   const next = Number(event.target.value);
                   setCourseSubjectId(next);
-                  const nextTheme = themes.find(
-                    (theme) => theme.subject_id === next,
-                  );
-                  setCourseThemeId(nextTheme?.id ?? 0);
-                  setParentId(
-                    chapters.find(
-                      (chapter) => chapter.theme_id === nextTheme?.id,
-                    )?.id ?? 0,
-                  );
+                  setParentId(chapters.find((chapter) => chapter.subject_id === next)?.id ?? 0);
+                  setFolderId(null);
                 }}
               >
                 {subjects.map((subject) => (
                   <option key={subject.id} value={subject.id}>
                     {subject.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t('editor.theme')}
-              <select
-                value={courseThemeId}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  setCourseThemeId(next);
-                  setParentId(
-                    chapters.find((chapter) => chapter.theme_id === next)?.id ??
-                      0,
-                  );
-                }}
-              >
-                {courseThemes.map((theme) => (
-                  <option key={theme.id} value={theme.id}>
-                    {theme.name}
                   </option>
                 ))}
               </select>
@@ -1594,6 +1559,18 @@ function Editor({
                 ))}
               </select>
             </label>
+            <label>
+              {t('editor.folder')}
+              <select
+                value={folderId ?? ""}
+                onChange={(event) => setFolderId(event.target.value ? Number(event.target.value) : null)}
+              >
+                <option value="">{t('editor.noFolder')}</option>
+                {courseFolders.filter((folder) => folder.chapter_id === parentId).map((folder) => (
+                  <option key={folder.id} value={folder.id}>{folder.name}</option>
+                ))}
+              </select>
+            </label>
           </div>
         ) : (
           entity !== "subjects" && (
@@ -1603,7 +1580,7 @@ function Editor({
                 value={parentId}
                 onChange={(event) => setParentId(Number(event.target.value))}
               >
-                {(entity === "themes" ? subjects : themes).map((parent) => (
+                {(entity === "course_folders" ? chapters : subjects).map((parent) => (
                   <option key={parent.id} value={parent.id}>
                     {"name" in parent ? parent.name : ""}
                   </option>
@@ -1641,9 +1618,9 @@ function Editor({
                 onImport={importFile}
               />
             </label>
-            {originalFilename && (
+            {importedFilename && (
               <div className="file-chip">
-                <Upload size={14} /> {originalFilename}
+                <Upload size={14} /> {importedFilename}
               </div>
             )}
           </>
