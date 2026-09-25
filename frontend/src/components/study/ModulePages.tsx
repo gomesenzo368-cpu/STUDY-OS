@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import SubjectIcon from "../SubjectIcon";
 import type { Chapter, Course, Subject } from "../../types";
+export { default as PlanningPage } from "../planning/PlanningPage";
 
 type ModuleCardProps = {
   icon: typeof BrainCircuit;
@@ -179,16 +180,6 @@ export function ControlsPage() {
       <ModuleHeader eyebrow="CONTRÔLES" title="Prépare tes prochains contrôles" description="Centralise les dates importantes et transforme-les en objectifs de révision." />
       <div className="module-toolbar"><span>Mes prochains contrôles</span><button className="secondary-button" disabled><ClipboardCheck size={16} /> Ajouter un contrôle</button></div>
       <EmptyModuleState icon={ClipboardCheck} title="Aucun contrôle prévu" description="Les contrôles que tu ajouteras apparaîtront ici avec leur temps restant et leur niveau de préparation." />
-    </section>
-  );
-}
-
-export function PlanningPage() {
-  return (
-    <section className="module-page">
-      <ModuleHeader eyebrow="PLANNING" title="Organise ton temps d'étude" description="Retrouve bientôt tes contrôles, sessions de révision et tâches scolaires au même endroit." />
-      <div className="planning-tabs"><button className="active">Aujourd'hui</button><button>Cette semaine</button><button>À venir</button></div>
-      <EmptyModuleState icon={CalendarDays} title="Ton planning est encore vide" description="Les prochaines échéances et sessions de travail seront regroupées ici." />
     </section>
   );
 }

@@ -6,12 +6,13 @@ import { normalizeSubjectIcon, subjectIconOptions } from './SubjectIcon'
 import { useI18n } from '../i18n/i18n'
 
 type Props = { item?: Subject; onClose: () => void; onSaved: (subject: Subject) => Promise<void>; onDelete?: (subject: Subject) => Promise<void>; onError: (message: string) => void }
-const colors = [
+export const subjectColors = [
   { name: 'Noir', value: '#111827' }, { name: 'Gris', value: '#6B7280' }, { name: 'Blanc', value: '#FFFFFF' },
   { name: 'Rouge', value: '#EF4444' }, { name: 'Orange', value: '#F97316' }, { name: 'Jaune', value: '#EAB308' },
   { name: 'Vert', value: '#22C55E' }, { name: 'Cyan', value: '#06B6D4' }, { name: 'Bleu', value: '#3B82F6' },
   { name: 'Violet', value: '#8B5CF6' }, { name: 'Rose', value: '#EC4899' },
-]
+ ] as const
+const colors = subjectColors
 
 export default function SubjectEditor({ item, onClose, onSaved, onDelete, onError }: Props) {
   const { t } = useI18n()

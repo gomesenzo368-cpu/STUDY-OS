@@ -194,6 +194,33 @@ function App() {
       setError(err instanceof Error ? err.message : t("errors.server"));
     }
   };
+  const addChapterItem = async (
+    chapterId: number,
+    item: { type: "course" | "folder"; id: number },
+    prepend: boolean,
+  ) => {
+    const items = await api.chapterItems(chapterId);
+    const itemKey = chapterItemKey(item);
+    const existingOrder = items.map(chapterItemKey);
+    const alreadyExists = existingOrder.includes(itemKey);
+
+    if (alreadyExists && !prepend) return existingOrder;
+
+    if (!alreadyExists) {
+      const position = items.reduce((maximum, current) => Math.max(maximum, current.position), -1) + 1;
+      await api.createChapterItem({
+        chapter_id: chapterId,
+        course_id: item.type === "course" ? item.id : null,
+        folder_id: item.type === "folder" ? item.id : null,
+        position,
+      });
+    }
+
+    const currentOrder = existingOrder.filter((key) => key !== itemKey);
+    const nextOrder = prepend ? [itemKey, ...currentOrder] : [...currentOrder, itemKey];
+    if (prepend) await api.reorderChapterItems(chapterId, nextOrder);
+    return nextOrder;
+  };
   const handleSignOut = async () => {
     try {
       await signOut();
@@ -294,11 +321,19 @@ function App() {
   const remove = async (entity: Entity, id: number, label: string) => {
     if (!window.confirm(t("confirm.delete", { name: label }))) return;
     try {
+      const removedCourse = entity === "courses" ? courses.find((course) => course.id === id) : undefined;
+      const removedFolder = entity === "course_folders" ? courseFolders.find((folder) => folder.id === id) : undefined;
       if (entity === "subjects") {
         await api.deleteSubject(id);
-        setSubjects((current) =>
-          current.filter((subject) => subject.id !== id),
-        );
+        await loadData();
+        if (selectedSubject === id) {
+          setSelectedSubject(null);
+          setSelectedChapter(null);
+          setSelectedCourseId(null);
+          setOpenFolderId(null);
+          setPreviewFolderId(null);
+          setFolderAddMenuId(null);
+        }
         setModal((current) =>
           current?.entity === "subjects" && current.item?.id === id
             ? null
@@ -306,9 +341,19 @@ function App() {
         );
       } else if (entity === "chapters") {
         await api.deleteChapter(id);
-        setChapters((current) =>
-          current.filter((chapter) => chapter.id !== id),
-        );
+        await loadData();
+        if (selectedChapter === id) {
+          setSelectedChapter(null);
+          setSelectedCourseId(null);
+          setOpenFolderId(null);
+          setPreviewFolderId(null);
+          setFolderAddMenuId(null);
+        }
+        setLocalChapterItemOrders((current) => {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
         setModal((current) =>
           current?.entity === "chapters" && current.item?.id === id
             ? null
@@ -316,18 +361,18 @@ function App() {
         );
       } else if (entity === "course_folders") {
         await api.deleteCourseFolder(id);
-        setCourseFolders((current) => current.filter((folder) => folder.id !== id));
-        setCourses((current) => current.map((course) => course.folder_id === id ? { ...course, folder_id: null } : course));
+        await loadData();
         if (openFolderId === id) setOpenFolderId(null);
         if (previewFolderId === id) setPreviewFolderId(null);
         if (folderAddMenuId === id) setFolderAddMenuId(null);
+        if (removedFolder) await loadChapterItemOrder(removedFolder.chapter_id);
       } else {
         await api.deleteCourse(id);
         await loadData();
+        if (selectedCourseId === id) setSelectedCourseId(null);
+        const chapterId = removedCourse?.chapter_id ?? selectedChapter;
+        if (chapterId !== null) await loadChapterItemOrder(chapterId);
       }
-      setSelectedSubject(null);
-      setSelectedChapter(null);
-      setSelectedCourseId(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('errors.delete'));
     }
@@ -335,22 +380,29 @@ function App() {
 
   const removeSubject = async (subject: Subject) => {
     try {
-      await api.deleteSubject(subject.id);
-      setSubjects((current) => current.filter((item) => item.id !== subject.id));
       const deletedChapterIds = new Set(
         chapters.filter((chapter) => chapter.subject_id === subject.id).map((chapter) => chapter.id),
       );
       const deletedFolderIds = new Set(
         courseFolders.filter((folder) => deletedChapterIds.has(folder.chapter_id)).map((folder) => folder.id),
       );
-      setChapters((current) => current.filter((chapter) => !deletedChapterIds.has(chapter.id)));
-      setCourseFolders((current) => current.filter((folder) => !deletedFolderIds.has(folder.id)));
-      setCourses((current) => current.filter((course) => !deletedChapterIds.has(course.chapter_id)));
+      await api.deleteSubject(subject.id);
+      await loadData();
       setModal(null);
-      setSelectedSubject(null);
-      setSelectedChapter(null);
-      setSelectedCourseId(null);
-      setPage("home");
+      if (selectedSubject === subject.id || (selectedChapter !== null && deletedChapterIds.has(selectedChapter))) {
+        setSelectedSubject(null);
+        setSelectedChapter(null);
+        setSelectedCourseId(null);
+        setOpenFolderId(null);
+      }
+      if (previewFolderId !== null && deletedFolderIds.has(previewFolderId)) setPreviewFolderId(null);
+      if (openFolderId !== null && deletedFolderIds.has(openFolderId)) setOpenFolderId(null);
+      if (folderAddMenuId !== null && deletedFolderIds.has(folderAddMenuId)) setFolderAddMenuId(null);
+      setLocalChapterItemOrders((current) => {
+        const next = { ...current };
+        deletedChapterIds.forEach((chapterId) => delete next[chapterId]);
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : t('errors.delete'));
     }
@@ -473,7 +525,7 @@ function App() {
   };
   const openCourse = (course: Course) => {
     setSelectedCourseId(course.id);
-    setOpenFolderId(null);
+    setOpenFolderId((current) => current === course.folder_id ? current : null);
     setPreviewFolderId(null);
     setFolderAddMenuId(null);
     setPage("courses");
@@ -686,7 +738,7 @@ function App() {
           ) : !search.trim() && page === "controls" ? (
             <ControlsPage />
           ) : !search.trim() && page === "planning" ? (
-            <PlanningPage />
+            <PlanningPage subjects={subjects} onGoToCourses={() => navigateFromPrimaryNavigation("courses")} />
           ) : !search.trim() && page === "progress" ? (
             <ProgressPage />
           ) : !search.trim() && page === "assistant" ? (
@@ -835,17 +887,21 @@ function App() {
             onClose={() => setModal(null)}
             onDelete={removeSubject}
             onSaved={async (savedSubject) => {
-              setSubjects((current) => {
-                const alreadyExists = current.some(
-                  (subject) => subject.id === savedSubject.id,
-                );
-                const next = alreadyExists
-                  ? current.map((subject) =>
-                      subject.id === savedSubject.id ? savedSubject : subject,
-                    )
-                  : [...current, savedSubject];
-                return next.sort(comparePositionedItems);
-              });
+              const alreadyExists = subjects.some((subject) => subject.id === savedSubject.id);
+              if (!alreadyExists) {
+                const orderedIds = [savedSubject.id, ...subjects.map((subject) => subject.id)];
+                await api.reorderSubjects(orderedIds);
+                const positions = new Map(orderedIds.map((id, position) => [id, position]));
+                const byId = new Map(subjects.map((subject) => [subject.id, subject]));
+                byId.set(savedSubject.id, savedSubject);
+                setSubjects(orderedIds.flatMap((id) => {
+                  const subject = byId.get(id);
+                  const position = positions.get(id);
+                  return subject && position !== undefined ? [{ ...subject, position }] : [];
+                }));
+              } else {
+                setSubjects((current) => current.map((subject) => subject.id === savedSubject.id ? savedSubject : subject).sort(comparePositionedItems));
+              }
               setModal(null);
             }}
             onError={setError}
@@ -860,19 +916,34 @@ function App() {
             onSaved={async (savedItem) => {
               setModal(null);
               if (modal.entity === "chapters" && savedItem && "subject_id" in savedItem) {
-                setChapters((current) => {
-                  const alreadyExists = current.some(
-                    (chapter) => chapter.id === savedItem.id,
-                  );
-                  const next = alreadyExists
-                    ? current.map((chapter) =>
-                        chapter.id === savedItem.id ? savedItem : chapter,
-                      )
-                    : [...current, savedItem];
-                  return next.sort(comparePositionedItems);
-                });
+                const chapter = savedItem as Chapter;
+                const alreadyExists = chapters.some((item) => item.id === chapter.id);
+                if (!alreadyExists) {
+                  const siblingIds = chapters
+                    .filter((item) => item.subject_id === chapter.subject_id)
+                    .sort(comparePositionedItems)
+                    .map((item) => item.id);
+                  const orderedIds = [chapter.id, ...siblingIds];
+                  await api.reorderChapters(chapter.subject_id, orderedIds);
+                  const positions = new Map(orderedIds.map((id, position) => [id, position]));
+                  setChapters((current) => {
+                    const byId = new Map(current.map((item) => [item.id, item]));
+                    byId.set(chapter.id, chapter);
+                    return [...byId.values()].map((item) => {
+                      const position = positions.get(item.id);
+                      return position !== undefined ? { ...item, position } : item;
+                    }).sort(comparePositionedItems);
+                  });
+                } else {
+                  setChapters((current) => current.map((item) => item.id === chapter.id ? chapter : item).sort(comparePositionedItems));
+                }
               } else if (modal.entity === "course_folders" && savedItem && "name" in savedItem && !("title" in savedItem)) {
                 const savedFolder = savedItem as CourseFolder;
+                const alreadyExists = courseFolders.some((folder) => folder.id === savedFolder.id);
+                if (!alreadyExists) {
+                  const chapterOrder = await addChapterItem(savedFolder.chapter_id, { type: "folder", id: savedFolder.id }, true);
+                  setLocalChapterItemOrders((current) => ({ ...current, [savedFolder.chapter_id]: chapterOrder }));
+                }
                 setCourseFolders((current) => {
                   const next = current.some((folder) => folder.id === savedFolder.id)
                     ? current.map((folder) => folder.id === savedFolder.id ? savedFolder : folder)
@@ -880,11 +951,34 @@ function App() {
                   return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
                 });
               } else if (modal.entity === "courses" && savedItem && "title" in savedItem) {
+                const savedCourse = savedItem as Course;
+                const alreadyExists = courses.some((course) => course.id === savedCourse.id);
+                let folderPositions: Map<number, number> | undefined;
+                if (!alreadyExists) {
+                  const chapterOrder = await addChapterItem(
+                    savedCourse.chapter_id,
+                    { type: "course", id: savedCourse.id },
+                    savedCourse.folder_id === null,
+                  );
+                  setLocalChapterItemOrders((current) => ({ ...current, [savedCourse.chapter_id]: chapterOrder }));
+                  if (savedCourse.folder_id !== null) {
+                    const orderedIds = [
+                      savedCourse.id,
+                      ...courses.filter((course) => course.folder_id === savedCourse.folder_id).map((course) => course.id),
+                    ];
+                    await api.reorderFolderCourses(savedCourse.folder_id, orderedIds);
+                    folderPositions = new Map(orderedIds.map((id, position) => [id, position]));
+                  }
+                }
+                const courseForState = folderPositions ? { ...savedCourse, folder_position: 0 } : savedCourse;
                 setCourses((current) => {
-                  const next = current.some((course) => course.id === savedItem.id)
-                    ? current.map((course) => course.id === savedItem.id ? savedItem : course)
-                    : [...current, savedItem];
-                  return next.sort((first, second) => first.created_at.localeCompare(second.created_at));
+                  const next = current.some((course) => course.id === courseForState.id)
+                    ? current.map((course) => course.id === courseForState.id ? courseForState : course)
+                    : [...current, courseForState];
+                  return next.map((course) => {
+                    const position = folderPositions?.get(course.id);
+                    return position !== undefined ? { ...course, folder_position: position } : course;
+                  }).sort((first, second) => first.created_at.localeCompare(second.created_at));
                 });
               } else {
                 await loadData();
@@ -1189,7 +1283,7 @@ function Dashboard({
           <span>
             <Plus size={20} />
           </span>
-          <strong>{t('home.addSubject')}</strong>
+          <strong>{t('library.newSubject')}</strong>
           <small>{t('home.buildSpace')}</small>
         </button>
       </div>
@@ -1290,7 +1384,7 @@ function CoursesView({
         </div>
         <div className="welcome-actions">
           <button className="small-button organize-button" onClick={() => selectedChapter ? onOrganizeItems(selectedChapter) : selectedSubject ? onOrganizeChapters(selectedSubject) : onOrganizeSubjects()}><ArrowUpDown size={16} /> {t('actions.organize')}</button>
-          <button className="primary-button" onClick={() => onAdd({ entity: "subjects" })}><Plus size={17} /> {t('library.add')}</button>
+          <button className="primary-button" onClick={() => onAdd({ entity: "subjects" })}><Plus size={17} /> {t('library.newSubject')}</button>
         </div>
       </div>
       <div className="breadcrumbs">
@@ -1387,7 +1481,7 @@ function EntityList({
           <h2>{title}</h2>
         </div>
         <button className="small-button" onClick={() => onAdd()}>
-          <Plus size={15} /> {t('actions.add')}
+          <Plus size={15} /> {entity === "subjects" ? t('library.newSubject') : t('library.newChapter')}
         </button>
       </div>
       {items.length === 0 ? (
@@ -1494,7 +1588,7 @@ function CourseList({
       <article className="course-row folder-row">
         <button className="course-open folder-open" onClick={() => onOpenFolder(folder.id)}>
           <div className="course-file"><Folder size={20} /></div>
-          <div className="course-copy"><div><span className="course-label">{t('library.newFolder')}</span><h3>{folder.name}</h3></div><small>{folderCourses.length} {t('library.coursesInFolder')}</small></div>
+          <div className="course-copy"><div><span className="course-label">{t('library.folderType')}</span><h3>{folder.name}</h3></div><small>{folderCourses.length} {t('library.coursesInFolder')}</small></div>
           <ChevronRight className="course-arrow" size={18} />
         </button>
         <div className="row-actions">
@@ -1573,7 +1667,7 @@ function FolderDetail({
       </div>
       <div className="folder-detail-heading">
         <div className="folder-detail-title"><span className="folder-detail-icon"><Folder size={23} /></span><div><span className="course-label">DOSSIER DE COURS</span><h1 className="display-title">{folder.name}</h1><p>{folderCourses.length} cours</p></div></div>
-        <div className="folder-detail-actions"><button className="small-button organize-button" onClick={onOrganize}><ArrowUpDown size={15} /> {t('actions.organize')}</button><button className="primary-button" onClick={onAddCourse}><Plus size={17} /> Ajouter un cours</button></div>
+        <div className="folder-detail-actions"><button className="small-button organize-button" onClick={onOrganize}><ArrowUpDown size={15} /> {t('actions.organize')}</button><button className="primary-button" onClick={onAddCourse}><Plus size={17} /> {t('library.newCourse')}</button></div>
       </div>
       {folderCourses.length ? (
         <div className="folder-course-list">
