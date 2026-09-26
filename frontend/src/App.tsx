@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpen,
@@ -31,8 +31,10 @@ import {
   Sparkles,
   Eye,
 } from "lucide-react";
-import { api } from "./api";
+import { api, type CourseDocumentUploadProgress } from "./api";
+import { createCourseWithDocuments, CourseDocumentWorkflowError, removeCancelledUpload } from "./courseDocumentWorkflow";
 import RichTextEditor from "./components/RichTextEditor";
+import CourseDocuments from "./components/CourseDocuments";
 import SubjectEditor from "./components/SubjectEditor";
 import DOMPurify from "dompurify";
 import type {
@@ -730,10 +732,6 @@ function App() {
               subjects={subjects}
               chapters={chapters}
               courses={courses}
-              onStudyCourse={(course) => {
-                setSelectedCourseId(course.id);
-                setPage("study");
-              }}
             />
           ) : !search.trim() && page === "controls" ? (
             <ControlsPage />
@@ -983,6 +981,11 @@ function App() {
               } else {
                 await loadData();
               }
+            }}
+            onDocumentUploadComplete={(course) => {
+              setPage("courses");
+              setSelectedCourseId(course.id);
+              setOpenFolderId(null);
             }}
             onError={setError}
           />
@@ -1915,6 +1918,7 @@ function CourseDetail({
           ),
         }}
       />
+      <CourseDocuments courseId={course.id} />
       <div className="course-meta">
         <span>
           {t('course.created', { date: new Date(course.created_at).toLocaleDateString() })}
@@ -1946,6 +1950,7 @@ function Editor({
   courseFolders,
   onClose,
   onSaved,
+  onDocumentUploadComplete,
   onError,
 }: {
   modal: NonNullable<ModalState>;
@@ -1954,6 +1959,7 @@ function Editor({
   courseFolders: CourseFolder[];
   onClose: () => void;
   onSaved: (item?: Chapter | CourseFolder | Course) => Promise<void>;
+  onDocumentUploadComplete?: (course: Course) => void;
   onError: (message: string) => void;
 }) {
   const { t } = useI18n();
@@ -1996,6 +2002,14 @@ function Editor({
   const [sourceType, setSourceType] = useState(
     item && "source_type" in item ? item.source_type : "manual",
   );
+  const [documentFiles, setDocumentFiles] = useState<File[]>([]);
+  const [createdCourse, setCreatedCourse] = useState<Course | null>(null);
+  const [documentUploadProgress, setDocumentUploadProgress] = useState<CourseDocumentUploadProgress | null>(null);
+  const [documentUploadState, setDocumentUploadState] = useState<'idle' | 'uploading' | 'complete' | 'failed' | 'cancelled'>('idle');
+  const [documentUploadError, setDocumentUploadError] = useState<string | null>(null);
+  const [uploadingDocuments, setUploadingDocuments] = useState(false);
+  const documentInputRef = useRef<HTMLInputElement>(null);
+  const documentUploadController = useRef<AbortController | null>(null);
   const courseChapters = chapters
     .filter((chapter) => chapter.subject_id === courseSubjectId)
     .sort(comparePositionedItems);
@@ -2010,8 +2024,47 @@ function Editor({
       onError(err instanceof Error ? err.message : t('errors.import'));
     }
   };
+  const selectCourseDocuments = (fileList: FileList | null) => {
+    if (!fileList?.length) return;
+    const selected = [...documentFiles, ...Array.from(fileList)];
+    if (selected.length > 10) {
+      setDocumentUploadError('10 fichiers maximum par import.');
+      return;
+    }
+    if (selected.some((file) => file.size <= 0 || file.size > 20 * 1024 * 1024)) {
+      setDocumentUploadError('Chaque fichier doit peser entre 1 octet et 20 Mo.');
+      return;
+    }
+    if (selected.reduce((total, file) => total + file.size, 0) > 50 * 1024 * 1024) {
+      setDocumentUploadError('Un import groupé ne peut pas dépasser 50 Mo.');
+      return;
+    }
+    const acceptedTypes: Record<string, string> = {
+      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+      '.pdf': 'application/pdf', '.txt': 'text/plain', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    const unsupported = Array.from(fileList).find((file) => {
+      const extension = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+      return acceptedTypes[extension] !== file.type;
+    });
+    if (unsupported) {
+      setDocumentUploadError(`Format ou type MIME non accepté : ${unsupported.name}`);
+      return;
+    }
+    setDocumentUploadError(null);
+    setDocumentFiles(selected);
+  };
+  const closeEditor = () => {
+    if (uploadingDocuments) {
+      documentUploadController.current?.abort();
+      return;
+    }
+    if (createdCourse) void onSaved(createdCourse);
+    else onClose();
+  };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (uploadingDocuments) return;
     try {
       if (entity === "chapters") {
         const fields = {
@@ -2041,10 +2094,72 @@ function Editor({
                 : content,
             source_type: sourceType,
           };
+          if (!isEdit && documentFiles.length) {
+            setUploadingDocuments(true);
+            setDocumentUploadState('uploading');
+            setDocumentUploadError(null);
+            setDocumentUploadProgress(null);
+            const controller = new AbortController();
+            documentUploadController.current = controller;
+            try {
+              const workflow = await createCourseWithDocuments({
+                createCourse: async () => {
+                  let course = createdCourse
+                    ? await api.updateCourse(createdCourse, fields)
+                    : await api.createCourse(folderContextLocked ? { ...fields, folder_id: null } : fields);
+                  if (!createdCourse) setCreatedCourse(course);
+                  if (folderContextLocked && modal.folderId !== null && modal.folderId !== undefined && course.folder_id === null) {
+                    course = await api.appendCourseToFolder(course, modal.folderId);
+                  }
+                  setCreatedCourse(course);
+                  return course;
+                },
+                files: [...documentFiles],
+                signal: controller.signal,
+                uploadFile: (courseId, file, signal, onProgress) => api.uploadCourseDocuments(
+                  courseId,
+                  [file],
+                  onProgress,
+                  signal,
+                ),
+                onProgress: setDocumentUploadProgress,
+                onDocumentUploaded: (file) => setDocumentFiles((current) => current.filter((candidate) => candidate !== file)),
+              });
+              setDocumentUploadState('complete');
+              await onSaved(workflow.course);
+              onDocumentUploadComplete?.(workflow.course);
+            } catch (uploadError) {
+              if (uploadError instanceof CourseDocumentWorkflowError) {
+                setCreatedCourse(uploadError.course);
+                if (uploadError.cancelled) {
+                  const remaining = removeCancelledUpload(uploadError.remainingFiles, uploadError.failedFile);
+                  setDocumentFiles(remaining);
+                  setDocumentUploadState(remaining.length ? 'cancelled' : 'idle');
+                  if (!remaining.length) {
+                    await onSaved(uploadError.course);
+                    onDocumentUploadComplete?.(uploadError.course);
+                  }
+                } else {
+                  setDocumentFiles(uploadError.remainingFiles);
+                  setDocumentUploadState('failed');
+                  setDocumentUploadError(uploadError.message);
+                }
+              } else {
+                setDocumentUploadState('failed');
+                setDocumentUploadError(uploadError instanceof Error ? uploadError.message : 'Import documentaire impossible.');
+              }
+            } finally {
+              documentUploadController.current = null;
+              setUploadingDocuments(false);
+            }
+            return;
+          }
           let savedCourse = isEdit
             ? await api.updateCourse(item as Course, fields)
-            : await api.createCourse(folderContextLocked ? { ...fields, folder_id: null } : fields);
-          if (!isEdit && folderContextLocked && modal.folderId !== null && modal.folderId !== undefined) {
+            : createdCourse
+              ? await api.updateCourse(createdCourse, fields)
+              : await api.createCourse(folderContextLocked ? { ...fields, folder_id: null } : fields);
+          if (!isEdit && folderContextLocked && modal.folderId !== null && modal.folderId !== undefined && savedCourse.folder_id === null) {
             savedCourse = await api.appendCourseToFolder(savedCourse, modal.folderId);
           }
           await onSaved(savedCourse);
@@ -2073,7 +2188,7 @@ function Editor({
                     : t('editor.labelTitle')}
             </h2>
           </div>
-          <button type="button" className="close-button" onClick={onClose}>
+          <button type="button" className="close-button" onClick={closeEditor}>
             <X size={18} />
           </button>
         </div>
@@ -2178,18 +2293,56 @@ function Editor({
                 <Upload size={14} /> {importedFilename}
               </div>
             )}
+            {!isEdit && (
+              <div className="create-course-documents">
+                <div className="create-course-documents-heading">
+                  <strong>Documents originaux</strong>
+                  <button type="button" className="small-button" onClick={() => documentInputRef.current?.click()} disabled={uploadingDocuments}>
+                    <Upload size={15} /> Ajouter des documents
+                  </button>
+                  <input
+                    ref={documentInputRef}
+                    className="course-documents-input"
+                    type="file"
+                    multiple
+                    accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.docx"
+                    onChange={(event) => {
+                      selectCourseDocuments(event.currentTarget.files);
+                      event.currentTarget.value = '';
+                    }}
+                  />
+                </div>
+                {documentFiles.length > 0 && <ul className="create-course-document-list">
+                  {documentFiles.map((file, index) => (
+                    <li key={`${file.name}-${file.lastModified}-${index}`}>
+                      <span>{file.name}</span>
+                      <small>{new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 }).format(file.size / 1024)} Ko</small>
+                      <button type="button" className="icon-button" aria-label={`Retirer ${file.name}`} disabled={uploadingDocuments} onClick={() => setDocumentFiles((current) => current.filter((candidate) => candidate !== file))}><X size={15} /></button>
+                    </li>
+                  ))}
+                </ul>}
+                {uploadingDocuments && documentUploadProgress && <div className="course-document-progress">
+                  <progress value={documentUploadProgress.percent} max={100} aria-label="Progression du transfert" />
+                  <span>{documentUploadProgress.percent}% · {documentUploadProgress.phase === 'saved' ? `${documentUploadProgress.filename} enregistré` : documentUploadProgress.phase === 'saving' ? `Enregistrement de ${documentUploadProgress.filename}…` : `Transfert ${documentUploadProgress.fileIndex}/${documentUploadProgress.fileCount}`}</span>
+                </div>}
+                {documentUploadState === 'cancelled' && <p className="course-document-result">Import annulé. Le cours et les documents déjà enregistrés sont conservés.</p>}
+                {documentUploadState === 'failed' && <p className="course-document-result is-failed">Le cours est créé. Les fichiers restants peuvent être réessayés.</p>}
+                {documentUploadState === 'complete' && <p className="course-document-result is-success">Import terminé.</p>}
+                {documentUploadError && <p className="course-documents-error" role="alert">{documentUploadError}</p>}
+              </div>
+            )}
           </>
         )}
         <div className="modal-actions">
-          <button type="button" className="secondary-button" onClick={onClose}>
-            {t('actions.cancel')}
+          <button type="button" className="secondary-button" onClick={closeEditor}>
+            {uploadingDocuments ? 'Annuler l’import' : createdCourse ? 'Fermer, garder le cours' : t('actions.cancel')}
           </button>
           <button
             className="primary-button"
             type="submit"
-            disabled={entity === "courses" && !parentId}
+            disabled={(entity === "courses" && !parentId) || uploadingDocuments}
           >
-            {isEdit ? t('actions.save') : t('actions.create')}
+            {documentFiles.length && documentUploadState === 'failed' ? 'Réessayer les fichiers restants' : documentFiles.length && documentUploadState === 'cancelled' ? 'Reprendre l’import des fichiers' : isEdit ? t('actions.save') : createdCourse ? 'Enregistrer le cours' : t('actions.create')}
           </button>
         </div>
       </form>

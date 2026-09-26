@@ -1,12 +1,21 @@
-import type { Chapter, ChapterItem, ChapterItemCreateFields, ChapterItemKey, Course, CourseFolder, MixedChapterItem, ReorderChapterItemPayload, ReorderChapterItemsPayload, Subject } from './types'
+import type { Chapter, ChapterItem, ChapterItemCreateFields, ChapterItemKey, Course, CourseDocument, CourseFolder, MixedChapterItem, PlanningCalendarBlock, PlanningCalendarBlockFields, PlanningException, PlanningExceptionFields, PlanningSeries, PlanningSeriesFields, PlanningYear, PlanningYearFields, ReorderChapterItemPayload, ReorderChapterItemsPayload, RevisionAnswerResult, RevisionReviewItem, RevisionSession, Subject } from './types'
 import { supabase } from './lib/supabase'
 
 const API_URL = import.meta.env.VITE_API_URL ?? '/api'
+
+export type AIChatResponse = {
+  status: 'completed' | 'unavailable' | 'error'
+  message: string | null
+  error_code: string | null
+  provider: string | null
+  provider_failures: { provider: string; error_code: string; retryable: boolean }[]
+}
 
 type SubjectFields = Pick<Subject, 'name' | 'description' | 'color' | 'icon'>
 type ChapterFields = Pick<Chapter, 'subject_id' | 'name' | 'description'>
 type CourseFolderFields = Pick<CourseFolder, 'chapter_id' | 'name'>
 type CourseFields = Pick<Course, 'chapter_id' | 'folder_id' | 'title' | 'content' | 'original_content' | 'source_type'>
+type PlanningExceptionUpsertFields = PlanningExceptionFields
 type ChapterItemRow = Pick<ChapterItem, 'id' | 'chapter_id' | 'user_id' | 'course_id' | 'folder_id' | 'position' | 'created_at' | 'updated_at'>
 type SupabaseError = { message: string; code?: string; details?: string; hint?: string }
 
@@ -150,6 +159,14 @@ async function updateSubject(subject: Subject, fields: SubjectFields): Promise<S
 
 async function deleteSubject(id: number): Promise<void> {
   const user = await getAuthenticatedUser()
+  const { data: chapters, error: chaptersError } = await supabase.from('chapters').select('id').eq('subject_id', id).eq('user_id', user.id)
+  if (chaptersError) throwSupabaseError('chapters', 'select before subject delete', chaptersError)
+  const chapterIds = (chapters ?? []).map((chapter) => chapter.id)
+  if (chapterIds.length) {
+    const { data: courses, error: coursesError } = await supabase.from('courses').select('id').eq('user_id', user.id).in('chapter_id', chapterIds)
+    if (coursesError) throwSupabaseError('courses', 'select before subject delete', coursesError)
+    await Promise.all((courses ?? []).map((course) => deleteCourseDocuments(course.id)))
+  }
   const { error } = await supabase.from('subjects').delete().eq('id', id).eq('user_id', user.id)
   if (error) throwSupabaseError('subjects', 'delete', error)
 }
@@ -193,6 +210,9 @@ async function updateChapter(chapter: Chapter, fields: ChapterFields): Promise<C
 
 async function deleteChapter(id: number): Promise<void> {
   const user = await getAuthenticatedUser()
+  const { data: courses, error: coursesError } = await supabase.from('courses').select('id').eq('chapter_id', id).eq('user_id', user.id)
+  if (coursesError) throwSupabaseError('courses', 'select before chapter delete', coursesError)
+  await Promise.all((courses ?? []).map((course) => deleteCourseDocuments(course.id)))
   const { error } = await supabase.from('chapters').delete().eq('id', id).eq('user_id', user.id)
   if (error) throwSupabaseError('chapters', 'delete', error)
 }
@@ -282,19 +302,318 @@ async function updateCourse(course: Course, fields: CourseFields): Promise<Cours
 
 async function deleteCourse(id: number): Promise<void> {
   const user = await getAuthenticatedUser()
+  await deleteCourseDocuments(id)
   const { error } = await supabase.from('courses').delete().eq('id', id).eq('user_id', user.id)
   if (error) throwSupabaseError('courses', 'delete', error)
+}
+
+async function getPlanningYears(): Promise<PlanningYear[]> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_years').select('*').eq('user_id', user.id).order('starts_on', { ascending: false }).order('id', { ascending: false })
+  if (error) throwSupabaseError('planning_years', 'select', error)
+  return (data ?? []) as PlanningYear[]
+}
+
+async function createPlanningYear(fields: PlanningYearFields): Promise<PlanningYear> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_years').insert({ user_id: user.id, ...fields }).select().single()
+  if (error) throwSupabaseError('planning_years', 'insert', error)
+  return data as PlanningYear
+}
+
+async function updatePlanningYear(id: number, fields: PlanningYearFields): Promise<PlanningYear> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_years').update(fields).eq('id', id).eq('user_id', user.id).select().single()
+  if (error) throwSupabaseError('planning_years', 'update', error)
+  return data as PlanningYear
+}
+
+async function deletePlanningYear(id: number): Promise<void> {
+  const user = await getAuthenticatedUser()
+  const { error } = await supabase.from('planning_years').delete().eq('id', id).eq('user_id', user.id)
+  if (error) throwSupabaseError('planning_years', 'delete', error)
+}
+
+async function getPlanningCalendarBlocks(yearId: number): Promise<PlanningCalendarBlock[]> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_calendar_blocks').select('*').eq('user_id', user.id).eq('year_id', yearId).order('starts_on', { ascending: true }).order('id', { ascending: true })
+  if (error) throwSupabaseError('planning_calendar_blocks', 'select', error)
+  return (data ?? []) as PlanningCalendarBlock[]
+}
+
+async function createPlanningCalendarBlock(fields: PlanningCalendarBlockFields): Promise<PlanningCalendarBlock> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_calendar_blocks').insert({ user_id: user.id, ...fields }).select().single()
+  if (error) throwSupabaseError('planning_calendar_blocks', 'insert', error)
+  return data as PlanningCalendarBlock
+}
+
+async function updatePlanningCalendarBlock(id: number, fields: PlanningCalendarBlockFields): Promise<PlanningCalendarBlock> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_calendar_blocks').update(fields).eq('id', id).eq('user_id', user.id).select().single()
+  if (error) throwSupabaseError('planning_calendar_blocks', 'update', error)
+  return data as PlanningCalendarBlock
+}
+
+async function deletePlanningCalendarBlock(id: number): Promise<void> {
+  const user = await getAuthenticatedUser()
+  const { error } = await supabase.from('planning_calendar_blocks').delete().eq('id', id).eq('user_id', user.id)
+  if (error) throwSupabaseError('planning_calendar_blocks', 'delete', error)
+}
+
+async function getPlanningSeries(yearId: number): Promise<PlanningSeries[]> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_series').select('*').eq('user_id', user.id).eq('year_id', yearId).order('day_of_week', { ascending: true }).order('start_time', { ascending: true })
+  if (error) throwSupabaseError('planning_series', 'select', error)
+  return (data ?? []) as PlanningSeries[]
+}
+
+async function createPlanningSeries(fields: PlanningSeriesFields): Promise<PlanningSeries> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_series').insert({ user_id: user.id, ...fields }).select().single()
+  if (error) throwSupabaseError('planning_series', 'insert', error)
+  return data as PlanningSeries
+}
+
+async function updatePlanningSeries(id: number, fields: PlanningSeriesFields): Promise<PlanningSeries> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_series').update(fields).eq('id', id).eq('user_id', user.id).select().single()
+  if (error) throwSupabaseError('planning_series', 'update', error)
+  return data as PlanningSeries
+}
+
+async function deletePlanningSeries(id: number): Promise<void> {
+  const user = await getAuthenticatedUser()
+  const { error } = await supabase.from('planning_series').delete().eq('id', id).eq('user_id', user.id)
+  if (error) throwSupabaseError('planning_series', 'delete', error)
+}
+
+async function getPlanningExceptions(seriesIds?: readonly number[]): Promise<PlanningException[]> {
+  const user = await getAuthenticatedUser()
+  if (seriesIds && seriesIds.length === 0) return []
+  let query = supabase.from('planning_exceptions').select('*').eq('user_id', user.id).order('occurrence_date', { ascending: true })
+  if (seriesIds) query = query.in('series_id', [...seriesIds])
+  const { data, error } = await query
+  if (error) throwSupabaseError('planning_exceptions', 'select', error)
+  return (data ?? []) as PlanningException[]
+}
+
+async function upsertPlanningException(fields: PlanningExceptionUpsertFields): Promise<PlanningException> {
+  const user = await getAuthenticatedUser()
+  const { data, error } = await supabase.from('planning_exceptions').upsert({ user_id: user.id, ...fields }, { onConflict: 'series_id,occurrence_date' }).select().single()
+  if (error) throwSupabaseError('planning_exceptions', 'upsert', error)
+  return data as PlanningException
+}
+
+async function deletePlanningException(id: number): Promise<void> {
+  const user = await getAuthenticatedUser()
+  const { error } = await supabase.from('planning_exceptions').delete().eq('id', id).eq('user_id', user.id)
+  if (error) throwSupabaseError('planning_exceptions', 'delete', error)
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const { data } = await supabase.auth.getSession()
   if (!data.session?.access_token) throw new Error('Ta session a expiré. Reconnecte-toi pour continuer.')
-  const response = await fetch(`${API_URL}${path}`, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.session.access_token}`, ...options?.headers }, ...options })
+  let response: Response
+  try {
+    response = await fetch(`${API_URL}${path}`, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.session.access_token}`, ...options?.headers }, ...options })
+  } catch {
+    throw new Error('Impossible de joindre le serveur API. Vérifie que le backend FastAPI est démarré.')
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: 'Une erreur est survenue.' }))
-    throw new Error(body.detail ?? 'Une erreur est survenue.')
+    const responseText = await response.text()
+    let body: Record<string, unknown> = {}
+    try {
+      const parsed: unknown = JSON.parse(responseText)
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) body = parsed as Record<string, unknown>
+    } catch {
+      // A proxy failure may return plain text instead of FastAPI's JSON error body.
+    }
+    const detail = body.detail
+    const validationMessage = Array.isArray(detail)
+      ? detail.map((entry) => typeof entry === 'object' && entry !== null && 'msg' in entry ? String(entry.msg) : '').filter(Boolean).join('; ')
+      : ''
+    const message = typeof detail === 'string'
+      ? detail
+      : validationMessage || (typeof body.error_code === 'string' ? body.error_code : '')
+    if (!message) {
+      const isServerError = response.status >= 500
+      const fallback = isServerError
+        ? `Le serveur API est indisponible (HTTP ${response.status}). Vérifie que le backend FastAPI est démarré.`
+        : `Le serveur API a répondu HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`
+      throw new Error(responseText.trim() ? `${fallback} ${responseText.trim().slice(0, 240)}` : fallback)
+    }
+    throw new Error(message)
   }
   return response.status === 204 ? (undefined as T) : response.json()
+}
+
+async function requestCourseDocuments<T>(path: string, options?: RequestInit): Promise<T> {
+  const { data } = await supabase.auth.getSession()
+  if (!data.session?.access_token) throw new Error('Ta session a expiré. Reconnecte-toi pour continuer.')
+  const method = options?.method ?? 'GET'
+  let response: Response
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      headers: { Authorization: `Bearer ${data.session.access_token}`, ...options?.headers },
+      ...options,
+    })
+  } catch {
+    throw new Error(`${method} ${API_URL}${path} : impossible de joindre le serveur API.`)
+  }
+  if (!response.ok) {
+    const responseText = await response.text()
+    let detail = responseText.trim()
+    try {
+      const body: unknown = JSON.parse(responseText)
+      if (typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string') detail = body.detail
+    } catch {
+      // Preserve plain-text proxy and backend responses for document diagnostics.
+    }
+    throw new Error(`${method} ${API_URL}${path} → HTTP ${response.status}${detail ? ` : ${detail}` : ''}`)
+  }
+  return response.status === 204 ? (undefined as T) : response.json()
+}
+
+async function askAssistant(message: string): Promise<AIChatResponse> {
+  return request<AIChatResponse>('/ai/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  })
+}
+
+async function startRevisionSession(courseId: number): Promise<RevisionSession> {
+  return request<RevisionSession>('/revisions/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ course_id: courseId }),
+  })
+}
+
+async function getRevisionSessions(): Promise<RevisionSession[]> {
+  return request<RevisionSession[]>('/revisions/sessions?limit=50')
+}
+
+async function getRevisionRecommendations(): Promise<RevisionReviewItem[]> {
+  return request<RevisionReviewItem[]>('/revisions/review?limit=100')
+}
+
+async function getRevisionSession(sessionId: number): Promise<RevisionSession> {
+  return request<RevisionSession>(`/revisions/sessions/${sessionId}`)
+}
+
+async function submitRevisionAnswer(sessionId: number, questionId: number, answer: unknown): Promise<RevisionAnswerResult> {
+  return request<RevisionAnswerResult>(`/revisions/sessions/${sessionId}/answers`, {
+    method: 'POST',
+    body: JSON.stringify({ question_id: questionId, answer }),
+  })
+}
+
+async function closeRevisionSession(sessionId: number, status: 'complete' | 'abandon'): Promise<void> {
+  return request<void>(`/revisions/sessions/${sessionId}/${status}`, { method: 'POST' })
+}
+
+async function getCourseDocuments(courseId: number): Promise<CourseDocument[]> {
+  return requestCourseDocuments<CourseDocument[]>(`/courses/${courseId}/documents`)
+}
+
+export type CourseDocumentUploadProgress = {
+  percent: number
+  phase: 'transferring' | 'saving' | 'saved'
+  fileIndex: number
+  fileCount: number
+  filename: string
+}
+
+async function uploadCourseDocuments(
+  courseId: number,
+  files: readonly File[],
+  onProgress: (progress: CourseDocumentUploadProgress) => void,
+  signal?: AbortSignal,
+): Promise<CourseDocument[]> {
+  const { data } = await supabase.auth.getSession()
+  if (!data.session?.access_token) throw new Error('Ta session a expiré. Reconnecte-toi pour continuer.')
+  const totalBytes = files.reduce((total, file) => total + file.size, 0)
+  let completedBytes = 0
+  const uploaded: CourseDocument[] = []
+
+  for (const [index, file] of files.entries()) {
+    if (signal?.aborted) throw new DOMException('Import annulé.', 'AbortError')
+    const form = new FormData()
+    form.append('files', file)
+    const path = `/courses/${courseId}/documents`
+    const url = `${API_URL}${path}`
+    const result = await new Promise<CourseDocument[]>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      const cleanup = () => signal?.removeEventListener('abort', abortRequest)
+      const abortRequest = () => xhr.abort()
+      xhr.open('POST', url)
+      xhr.setRequestHeader('Authorization', `Bearer ${data.session?.access_token}`)
+      xhr.upload.addEventListener('progress', (event) => {
+        if (!event.lengthComputable || totalBytes === 0) return
+        const fraction = Math.min(1, event.loaded / event.total)
+        onProgress({
+          percent: Math.min(99, Math.round((completedBytes + file.size * fraction) / totalBytes * 100)),
+          phase: 'transferring',
+          fileIndex: index + 1,
+          fileCount: files.length,
+          filename: file.name,
+        })
+      })
+      xhr.upload.addEventListener('load', () => onProgress({
+        percent: Math.min(99, Math.round((completedBytes + file.size) / totalBytes * 100)),
+        phase: 'saving',
+        fileIndex: index + 1,
+        fileCount: files.length,
+        filename: file.name,
+      }))
+      xhr.addEventListener('load', () => {
+        cleanup()
+        let body: unknown
+        try {
+          body = JSON.parse(xhr.responseText)
+        } catch {
+          body = null
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && Array.isArray(body)) {
+          const confirmedBytes = completedBytes + file.size
+          onProgress({
+            percent: Math.min(100, Math.round(confirmedBytes / totalBytes * 100)),
+            phase: 'saved',
+            fileIndex: index + 1,
+            fileCount: files.length,
+            filename: file.name,
+          })
+          resolve(body as CourseDocument[])
+          return
+        }
+        const detail = typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string'
+          ? body.detail
+          : xhr.responseText.trim() || xhr.statusText || 'Réponse vide du serveur.'
+        reject(new Error(`POST ${url} → HTTP ${xhr.status}${detail ? ` : ${detail}` : ''}`))
+      })
+      xhr.addEventListener('error', () => {
+        cleanup()
+        reject(new Error(`POST ${url} : erreur réseau pendant l’envoi.`))
+      })
+      xhr.addEventListener('abort', () => {
+        cleanup()
+        reject(new DOMException('Import annulé.', 'AbortError'))
+      })
+      signal?.addEventListener('abort', abortRequest, { once: true })
+      xhr.send(form)
+    })
+    uploaded.push(...result)
+    completedBytes += file.size
+  }
+  return uploaded
+}
+
+async function deleteCourseDocument(courseId: number, documentId: string): Promise<void> {
+  return requestCourseDocuments<void>(`/courses/${courseId}/documents/${documentId}`, { method: 'DELETE' })
+}
+
+async function deleteCourseDocuments(courseId: number): Promise<void> {
+  return requestCourseDocuments<void>(`/courses/${courseId}/documents`, { method: 'DELETE' })
 }
 
 export const api = {
@@ -322,6 +641,32 @@ export const api = {
   createCourse,
   updateCourse,
   deleteCourse,
+  getPlanningYears,
+  createPlanningYear,
+  updatePlanningYear,
+  deletePlanningYear,
+  getPlanningCalendarBlocks,
+  createPlanningCalendarBlock,
+  updatePlanningCalendarBlock,
+  deletePlanningCalendarBlock,
+  getPlanningSeries,
+  createPlanningSeries,
+  updatePlanningSeries,
+  deletePlanningSeries,
+  getPlanningExceptions,
+  upsertPlanningException,
+  deletePlanningException,
+  askAssistant,
+  startRevisionSession,
+  getRevisionSessions,
+  getRevisionRecommendations,
+  getRevisionSession,
+  submitRevisionAnswer,
+  closeRevisionSession,
+      deleteCourseDocuments,
+    getCourseDocuments,
+    uploadCourseDocuments,
+    deleteCourseDocument,
   create: <T>(entity: string, body: object) => request<T>(`/${entity}`, { method: 'POST', body: JSON.stringify(body) }),
   update: <T>(entity: string, id: number, body: object) => request<T>(`/${entity}/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   remove: (entity: string, id: number) => request<void>(`/${entity}/${id}`, { method: 'DELETE' }),

@@ -1,0 +1,40 @@
+.course-documents { padding-top: 30px; margin-top: 30px; border-top: 1px solid var(--border); }
+.course-documents-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.course-documents-heading h2 { margin: 6px 0 0; font-size: 20px; }
+.course-documents-input { display: none; }
+.course-document-list { padding: 0; margin: 0; list-style: none; }
+.course-document-row { display: flex; min-width: 0; align-items: center; gap: 13px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.course-document-preview { display: grid; width: 48px; height: 56px; flex: 0 0 auto; overflow: hidden; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--surface-muted); color: var(--accent); }
+.course-document-preview img { width: 100%; height: 100%; object-fit: cover; }
+.course-document-info { display: grid; min-width: 0; flex: 1; gap: 5px; }
+.course-document-info strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.course-document-info small { color: var(--text-muted); font-size: 11px; }
+.course-document-status { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; background: var(--surface-muted); color: var(--text-muted); font-size: 10px; }
+.course-document-status.status-ready { background: color-mix(in srgb, var(--success) 12%, var(--surface)); color: var(--success); }
+.course-document-status.status-failed { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); }
+.course-document-pending { padding: 14px; border: 1px dashed var(--border); border-radius: var(--radius-small); background: var(--surface-muted); }
+.course-document-list-heading, .course-document-actions, .course-document-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.course-document-list-heading { margin-bottom: 8px; color: var(--text-muted); font-size: 12px; }
+.course-document-list-heading strong { color: var(--text); }
+.text-button { padding: 5px 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 600; }
+.course-document-actions { justify-content: flex-end; margin-top: 12px; }
+.course-document-actions .primary-button, .course-document-actions .secondary-button { min-height: 38px; }
+.course-document-progress { margin-top: 12px; color: var(--text-muted); font-size: 11px; }
+.course-document-progress progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.course-documents-error { padding: 10px 12px; border-radius: var(--radius-small); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--danger); font-size: 12px; }
+.course-documents-empty { padding: 18px 0; margin: 0; color: var(--text-muted); font-size: 12px; }
+.course-document-result { margin: 10px 0; color: var(--text-muted); font-size: 12px; }
+.course-document-result.is-success { color: var(--success); }
+.course-document-result.is-failed { color: var(--danger); }
+.create-course-documents { padding: 14px; margin-top: 15px; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--surface-muted); }
+.create-course-documents-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; color: var(--text); font-size: 12px; }
+.create-course-document-list { display: grid; gap: 5px; padding: 0; margin: 11px 0 0; list-style: none; }
+.create-course-document-list li { display: flex; min-width: 0; align-items: center; gap: 9px; padding-top: 7px; border-top: 1px solid var(--border); }
+.create-course-document-list li > span { overflow: hidden; min-width: 0; flex: 1; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.create-course-document-list li > small { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+@media (max-width: 560px) {
+  .course-documents-heading { align-items: flex-start; }
+  .course-document-row { gap: 9px; }
+  .course-document-status { padding: 4px 6px; }
+  .course-document-actions > button { width: auto; flex: 1; }
+}

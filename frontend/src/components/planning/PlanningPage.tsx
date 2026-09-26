@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
-  AlertCircle,
   ArrowRight,
   Ban,
   CalendarDays,
@@ -21,19 +20,26 @@ import {
 } from "lucide-react";
 import { useI18n } from "../../i18n/i18n";
 import type { Subject } from "../../types";
+import { useAuth } from "../../contexts/AuthContext";
+import type { PlanningCalendarBlock as PlanningCalendarBlockRow, PlanningException, PlanningSeries, PlanningSeriesOverrides } from "../../types";
 import type { TranslationKey } from "../../i18n/translations";
+import { api } from "../../api";
 import { subjectColors } from "../SubjectEditor";
 import { normalizeSubjectIcon, subjectIconOptions } from "../SubjectIcon";
 import "./planning.css";
 
 type ViewMode = "day" | "week" | "month";
 type Recurrence = "weekly" | "even" | "odd" | "once";
+type WeekPattern = "all" | "even" | "odd";
 type IconKey = (typeof subjectIconOptions)[number]["name"];
 type ColorKey = (typeof subjectColors)[number]["value"];
-type CalendarBlock = { id: string; kind: "break" | "holiday"; name?: string; startsOn: string; endsOn: string };
-type EventPatch = Partial<Pick<ScheduleEvent, "title" | "teacher" | "room" | "startTime" | "endTime" | "color" | "icon" | "subjectId">>;
+type CalendarBlock = { id: number | string; kind: "break" | "holiday"; name?: string; startsOn: string; endsOn: string };
+type EventPatch = Partial<Pick<ScheduleEvent, "title" | "teacher" | "room" | "startTime" | "endTime" | "color" | "icon" | "subjectId">> & { exceptionId?: number; exceptionStatus?: "cancelled" | "modified"; overrideDate?: string | null };
 type ScheduleEvent = {
-  id: string;
+  id: number;
+  yearId: number;
+  startsOn: string;
+  endsOn: string | null;
   title: string;
   subjectId: number | null;
   date: string | null;
@@ -43,6 +49,7 @@ type ScheduleEvent = {
   startTime: string;
   endTime: string;
   recurrence: Recurrence;
+  weekPattern: WeekPattern;
   color: ColorKey;
   icon: IconKey;
   cancelled: boolean;
@@ -51,6 +58,7 @@ type ScheduleEvent = {
 };
 type Occurrence = {
   event: ScheduleEvent;
+  occurrenceDate: string;
   date: string;
   title: string;
   teacher: string;
@@ -61,9 +69,9 @@ type Occurrence = {
   icon: IconKey;
   cancelled: boolean;
 };
-type SchoolYear = { startsOn: string; endsOn: string; blocks: CalendarBlock[] };
-type PlanningState = { version: 3; schoolYear: SchoolYear; events: ScheduleEvent[] };
-type EventFormValues = Omit<ScheduleEvent, "id" | "cancelled" | "cancelledDates" | "exceptions"> & { id?: string };
+type SchoolYear = { id: number | null; name: string; startsOn: string; endsOn: string; timeZone: string; blocks: CalendarBlock[] };
+type PlanningState = { schoolYear: SchoolYear; events: ScheduleEvent[] };
+type EventFormValues = Omit<ScheduleEvent, "id" | "yearId" | "startsOn" | "endsOn" | "cancelled" | "cancelledDates" | "exceptions">;
 type ModalState =
   | { kind: "create" }
   | { kind: "details"; occurrence: Occurrence }
@@ -77,8 +85,7 @@ const GRID_START_HOUR = 7;
 const GRID_END_HOUR = 20;
 const HOUR_HEIGHT = 76;
 const DAY_NAMES = ["planning.monday", "planning.tuesday", "planning.wednesday", "planning.thursday", "planning.friday", "planning.saturday", "planning.sunday"] as const;
-const PLANNING_STORAGE_KEY = "study-os-planning";
-const emptyPlanningState: PlanningState = { version: 3, schoolYear: { startsOn: "", endsOn: "", blocks: [] }, events: [] };
+const emptyPlanningState: PlanningState = { schoolYear: { id: null, name: "Année scolaire", startsOn: "", endsOn: "", timeZone: "UTC", blocks: [] }, events: [] };
 const defaultSubjectColor = subjectColors.find((color) => color.value === "#3B82F6")?.value ?? subjectColors[0].value;
 
 function createPlanningId() {
@@ -87,36 +94,66 @@ function createPlanningId() {
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function loadPlanningState(): PlanningState {
-  try {
-    const raw = window.localStorage.getItem(PLANNING_STORAGE_KEY);
-    if (!raw) return emptyPlanningState;
-    const parsed = JSON.parse(raw) as Partial<PlanningState>;
-    if (parsed.version !== 3 || !parsed.schoolYear || !Array.isArray(parsed.events)) return emptyPlanningState;
-    return {
-      version: 3,
-      schoolYear: {
-        startsOn: typeof parsed.schoolYear.startsOn === "string" ? parsed.schoolYear.startsOn : "",
-        endsOn: typeof parsed.schoolYear.endsOn === "string" ? parsed.schoolYear.endsOn : "",
-        blocks: Array.isArray(parsed.schoolYear.blocks) ? parsed.schoolYear.blocks.filter(isCalendarBlock) : [],
-      },
-      events: parsed.events.filter(isScheduleEvent),
-    };
-  } catch {
-    return emptyPlanningState;
-  }
+function exceptionPatchFromRow(exception: PlanningException): EventPatch {
+  const overrides = exception.overrides;
+  return {
+    ...(overrides.title === undefined ? {} : { title: overrides.title }),
+    ...(overrides.subject_id === undefined ? {} : { subjectId: overrides.subject_id }),
+    ...(overrides.teacher === undefined ? {} : { teacher: overrides.teacher ?? "" }),
+    ...(overrides.room === undefined ? {} : { room: overrides.room ?? "" }),
+    ...(overrides.start_time === undefined ? {} : { startTime: overrides.start_time }),
+    ...(overrides.end_time === undefined ? {} : { endTime: overrides.end_time }),
+    ...(overrides.color_key === undefined ? {} : { color: (subjectColors.find((color) => color.value.toLowerCase() === overrides.color_key?.toLowerCase())?.value ?? defaultSubjectColor) as ColorKey }),
+    ...(overrides.icon_key === undefined ? {} : { icon: (subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(overrides.icon_key))?.name ?? "book") as IconKey }),
+    exceptionId: exception.id,
+    exceptionStatus: exception.status,
+    overrideDate: exception.override_date,
+  };
 }
 
-function isCalendarBlock(value: unknown): value is CalendarBlock {
-  if (!value || typeof value !== "object") return false;
-  const block = value as Partial<CalendarBlock>;
-  return typeof block.id === "string" && (block.kind === "break" || block.kind === "holiday") && typeof block.startsOn === "string" && typeof block.endsOn === "string";
+function eventPatchToOverrides(patch: EventPatch): PlanningSeriesOverrides {
+  return {
+    ...(patch.title === undefined ? {} : { title: patch.title }),
+    ...(patch.subjectId === undefined ? {} : { subject_id: patch.subjectId }),
+    ...(patch.teacher === undefined ? {} : { teacher: patch.teacher || null }),
+    ...(patch.room === undefined ? {} : { room: patch.room || null }),
+    ...(patch.startTime === undefined ? {} : { start_time: patch.startTime }),
+    ...(patch.endTime === undefined ? {} : { end_time: patch.endTime }),
+    ...(patch.color === undefined ? {} : { color_key: patch.color }),
+    ...(patch.icon === undefined ? {} : { icon_key: patch.icon }),
+  };
 }
 
-function isScheduleEvent(value: unknown): value is ScheduleEvent {
-  if (!value || typeof value !== "object") return false;
-  const event = value as Partial<ScheduleEvent>;
-  return typeof event.id === "string" && typeof event.title === "string" && (typeof event.subjectId === "number" || event.subjectId === null) && (typeof event.date === "string" || event.date === null) && typeof event.dayOfWeek === "number" && typeof event.startTime === "string" && typeof event.endTime === "string" && Array.isArray(event.cancelledDates) && Boolean(event.exceptions);
+function eventFromRow(row: PlanningSeries, exceptions: PlanningException[]): ScheduleEvent {
+  const eventExceptions = Object.fromEntries(exceptions.map((exception) => [exception.occurrence_date, exceptionPatchFromRow(exception)]));
+  const recurrence: Recurrence = row.recurrence === "once" ? "once" : row.week_pattern === "all" ? "weekly" : row.week_pattern;
+  const color = subjectColors.find((option) => option.value.toLowerCase() === row.color_key?.toLowerCase())?.value ?? defaultSubjectColor;
+  const icon = subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(row.icon_key))?.name ?? "book";
+  return {
+    id: row.id,
+    yearId: row.year_id,
+    startsOn: row.starts_on,
+    endsOn: row.ends_on,
+    title: row.title,
+    subjectId: row.subject_id,
+    date: row.recurrence === "once" ? row.starts_on : null,
+    teacher: row.teacher ?? "",
+    room: row.room ?? "",
+    dayOfWeek: row.day_of_week,
+    startTime: row.start_time.slice(0, 5),
+    endTime: row.end_time.slice(0, 5),
+    recurrence,
+    weekPattern: row.week_pattern,
+    color: color as ColorKey,
+    icon: icon as IconKey,
+    cancelled: row.status === "cancelled",
+    cancelledDates: exceptions.filter((exception) => exception.status === "cancelled").map((exception) => exception.occurrence_date),
+    exceptions: eventExceptions,
+  };
+}
+
+function calendarBlockFromRow(row: PlanningCalendarBlockRow): CalendarBlock {
+  return { id: row.id, kind: row.kind, name: row.name ?? undefined, startsOn: row.starts_on, endsOn: row.ends_on };
 }
 
 function pad(value: number) {
@@ -189,35 +226,37 @@ function calendarBlockLabel(block: CalendarBlock, t: (key: never, values?: Recor
 function occurrencesForDates(events: ScheduleEvent[], dates: Date[], year: SchoolYear): Occurrence[] {
   if (!year.startsOn || !year.endsOn) return [];
   const dateKeys = new Set(dates.map(toDateKey));
-  const firstDate = dates[0];
-  const lastDate = dates[dates.length - 1];
-  const yearStart = parseDateKey(year.startsOn);
-  const yearEnd = parseDateKey(year.endsOn);
   const result: Occurrence[] = [];
   for (const event of events) {
-    if (event.recurrence === "once") {
-      const dateKey = event.date;
-      if (!dateKey || dateKey < year.startsOn || dateKey > year.endsOn) continue;
-      if (!dateKeys.has(dateKey)) continue;
-      const block = year.blocks.find((item) => dateKey >= item.startsOn && dateKey <= item.endsOn);
-      if (block) continue;
-      const override = event.exceptions[dateKey] ?? {};
-      result.push({ event, date: dateKey, title: override.title ?? event.title, teacher: override.teacher ?? event.teacher, room: override.room ?? event.room, startTime: override.startTime ?? event.startTime, endTime: override.endTime ?? event.endTime, color: override.color ?? event.color, icon: override.icon ?? event.icon, cancelled: event.cancelled || event.cancelledDates.includes(dateKey) });
-      continue;
+    const sourceDateKeys = new Set(dateKeys);
+    for (const [sourceDate, exception] of Object.entries(event.exceptions)) {
+      if (exception.overrideDate && dateKeys.has(exception.overrideDate)) sourceDateKeys.add(sourceDate);
     }
-    const from = dayDifference(yearStart, firstDate) > 0 ? firstDate : yearStart;
-    const through = dayDifference(yearEnd, lastDate) < 0 ? lastDate : yearEnd;
-    for (let date = from; dayDifference(date, through) >= 0; date = addDays(date, 1)) {
-      if (!dateKeys.has(toDateKey(date)) || isoWeekday(date) !== event.dayOfWeek) continue;
-      const week = getSchoolWeek(date, year);
-      if (!week && event.recurrence !== "weekly") continue;
+    for (const occurrenceDate of sourceDateKeys) {
+      if (occurrenceDate < event.startsOn || (event.endsOn !== null && occurrenceDate > event.endsOn)) continue;
+      if (event.recurrence === "once" && occurrenceDate !== event.date) continue;
+      const sourceDate = parseDateKey(occurrenceDate);
+      if (event.recurrence !== "once" && isoWeekday(sourceDate) !== event.dayOfWeek) continue;
+      const week = getSchoolWeek(sourceDate, year);
       if (event.recurrence === "even" && week?.parity !== "even") continue;
       if (event.recurrence === "odd" && week?.parity !== "odd") continue;
-      const dateKey = toDateKey(date);
-      const block = year.blocks.find((item) => dateKey >= item.startsOn && dateKey <= item.endsOn);
-      if (block) continue;
-      const override = event.exceptions[dateKey] ?? {};
-      result.push({ event, date: dateKey, title: override.title ?? event.title, teacher: override.teacher ?? event.teacher, room: override.room ?? event.room, startTime: override.startTime ?? event.startTime, endTime: override.endTime ?? event.endTime, color: override.color ?? event.color, icon: override.icon ?? event.icon, cancelled: event.cancelled || event.cancelledDates.includes(dateKey) });
+      const exception = event.exceptions[occurrenceDate];
+      const date = exception?.overrideDate ?? occurrenceDate;
+      if (!dateKeys.has(date) || date < year.startsOn || date > year.endsOn) continue;
+      if (year.blocks.some((block) => date >= block.startsOn && date <= block.endsOn)) continue;
+      result.push({
+        event,
+        occurrenceDate,
+        date,
+        title: exception?.title ?? event.title,
+        teacher: exception?.teacher ?? event.teacher,
+        room: exception?.room ?? event.room,
+        startTime: exception?.startTime ?? event.startTime,
+        endTime: exception?.endTime ?? event.endTime,
+        color: exception?.color ?? event.color,
+        icon: exception?.icon ?? event.icon,
+        cancelled: event.cancelled || exception?.exceptionStatus === "cancelled",
+      });
     }
   }
   return result.sort((first, second) => first.startTime.localeCompare(second.startTime));
@@ -310,53 +349,63 @@ function PlanningEventForm({ initial, mode, initialDate, schoolYear, subjects, o
   subjects: Subject[];
   onGoToCourses: () => void;
   onClose: () => void;
-  onSave: (value: EventFormValues) => void;
+  onSave: (value: EventFormValues) => Promise<void>;
   t: (key: never, values?: Record<string, string | number>) => string;
 }) {
   const { language } = useI18n();
   const locale = language === "zh" ? "zh-CN" : language;
   const initialValues: EventFormValues = initial ?? {
-    title: "", subjectId: null, date: null, teacher: "", room: "", dayOfWeek: isoWeekday(initialDate), startTime: "09:00", endTime: "10:00", recurrence: "weekly", color: defaultSubjectColor, icon: "book",
+    title: "", subjectId: null, date: null, teacher: "", room: "", dayOfWeek: isoWeekday(initialDate), startTime: "09:00", endTime: "10:00", recurrence: "weekly", weekPattern: "all", color: defaultSubjectColor, icon: "book",
   };
   const [values, setValues] = useState(initialValues);
-  const linkedSubject = subjects.find((subject) => subject.id === values.subjectId);
-  const linkedColor = subjectColors.find((color) => color.value.toLowerCase() === linkedSubject?.color?.toLowerCase())?.value;
-  const linkedIcon = subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(linkedSubject?.icon))?.name;
-  const eventColor = linkedSubject ? linkedColor ?? values.color : values.color;
-  const eventIcon = linkedSubject ? linkedIcon ?? values.icon : values.icon;
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const eventColor = values.color;
+  const eventIcon = values.icon;
   const set = <K extends keyof EventFormValues>(key: K, value: EventFormValues[K]) => setValues((current) => ({ ...current, [key]: value }));
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (values.endTime <= values.startTime) return;
+    if (saving || values.endTime <= values.startTime) return;
     const singleDate = toDateKey(initialDate);
-    if (values.subjectId === null) return;
-    onSave({ ...values, title: values.title.trim(), teacher: values.teacher.trim(), room: values.room.trim(), color: eventColor, icon: eventIcon, date: values.recurrence === "once" ? singleDate : null });
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave({ ...values, title: values.title.trim(), teacher: values.teacher.trim(), room: values.room.trim(), color: eventColor, icon: eventIcon, date: values.recurrence === "once" ? singleDate : null });
+    } catch {
+      setSaveError(t("planning.saveError" as never));
+    } finally {
+      setSaving(false);
+    }
   };
   const onSubjectChange = (rawId: string) => {
     const selectedSubject = subjects.find((subject) => subject.id === Number(rawId));
     setValues((current) => ({
       ...current,
       subjectId: selectedSubject?.id ?? null,
-      color: (subjectColors.find((color) => color.value.toLowerCase() === selectedSubject?.color?.toLowerCase())?.value ?? current.color) as ColorKey,
-      icon: (subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(selectedSubject?.icon))?.name ?? current.icon) as IconKey,
+      ...(selectedSubject ? {
+        title: selectedSubject.name,
+        color: (subjectColors.find((color) => color.value.toLowerCase() === selectedSubject.color?.toLowerCase())?.value ?? current.color) as ColorKey,
+        icon: (subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(selectedSubject.icon))?.name ?? current.icon) as IconKey,
+      } : {}),
     }));
   };
   const PreviewIcon = subjectIconOptions.find((option) => option.name === eventIcon)?.Icon ?? subjectIconOptions[0].Icon;
   return (
     <form className="planning-modal-form" onSubmit={submit}>
       <label className="planning-field planning-field-wide"><span>{t("planning.courseName" as never)}</span><input required value={values.title} onChange={(event) => set("title", event.target.value)} placeholder={t("planning.courseNamePlaceholder" as never)} /></label>
-      <label className="planning-field planning-field-wide"><span>{t("planning.subject" as never)}</span><select required value={values.subjectId ?? ""} onChange={(event) => onSubjectChange(event.target.value)}><option value="">{t("planning.chooseSubject" as never)}</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select>{!subjects.length && <span className="planning-course-unavailable">{t("planning.noSubjectsAvailable" as never)} <button type="button" className="text-button" onClick={onGoToCourses}>{t("planning.goToCourses" as never)}</button></span>}</label>
+      <label className="planning-field planning-field-wide"><span>{t("planning.subject" as never)}</span><select value={values.subjectId ?? ""} onChange={(event) => onSubjectChange(event.target.value)}><option value="">{t("planning.chooseSubject" as never)}</option>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select>{!subjects.length && <span className="planning-course-unavailable">{t("planning.noSubjectsAvailable" as never)} <button type="button" className="text-button" onClick={onGoToCourses}>{t("planning.goToCourses" as never)}</button></span>}</label>
       <label className="planning-field"><span>{t("planning.teacher" as never)}</span><input value={values.teacher} onChange={(event) => set("teacher", event.target.value)} placeholder={t("planning.optional" as never)} /></label>
       <label className="planning-field"><span>{t("planning.room" as never)}</span><input value={values.room} onChange={(event) => set("room", event.target.value)} placeholder={t("planning.optional" as never)} /></label>
       <label className="planning-field"><span>{t("planning.day" as never)}</span><select value={values.dayOfWeek} onChange={(event) => set("dayOfWeek", Number(event.target.value))}>{DAY_NAMES.map((name, index) => <option key={name} value={index + 1}>{t(name as never)}</option>)}</select></label>
-      <label className="planning-field"><span>{t("planning.week" as never)}</span><select value={values.recurrence} onChange={(event) => set("recurrence", event.target.value as Recurrence)}><option value="weekly">{t("planning.everyWeek" as never)}</option><option value="even">{t("planning.evenWeeks" as never)}</option><option value="odd">{t("planning.oddWeeks" as never)}</option><option value="once">{t("planning.once" as never)}</option></select></label>
+      <label className="planning-field"><span>{t("planning.week" as never)}</span><select value={values.recurrence === "once" ? "once" : values.recurrence === "weekly" ? "weekly" : values.recurrence} onChange={(event) => { const value = event.target.value as Recurrence; setValues((current) => ({ ...current, recurrence: value, weekPattern: value === "even" || value === "odd" ? value : "all" })); }}><option value="weekly">{t("planning.everyWeek" as never)}</option><option value="even">{t("planning.evenWeeks" as never)}</option><option value="odd">{t("planning.oddWeeks" as never)}</option><option value="once">{t("planning.once" as never)}</option></select></label>
       {values.recurrence === "once" && <p className="planning-single-date">{t("planning.singleDate" as never, { date: formatDate(initialDate, locale, { weekday: "long", day: "numeric", month: "long" }) })}</p>}
       <label className="planning-field"><span>{t("planning.startTime" as never)}</span><input type="time" required value={values.startTime} onChange={(event) => set("startTime", event.target.value)} /></label>
       <label className="planning-field"><span>{t("planning.endTime" as never)}</span><input type="time" required min={values.startTime} value={values.endTime} onChange={(event) => set("endTime", event.target.value)} /></label>
-      <div className="planning-field planning-field-wide"><span>{t("planning.color" as never)}</span><div className="planning-swatches">{subjectColors.map((option) => <button type="button" key={option.value} disabled={Boolean(linkedSubject)} className={`planning-swatch ${eventColor.toLowerCase() === option.value.toLowerCase() ? "selected" : ""}`} style={{ background: option.value }} onClick={() => set("color", option.value)} aria-label={option.name} aria-pressed={eventColor.toLowerCase() === option.value.toLowerCase()} title={option.name} />)}</div></div>
-      <div className="planning-field planning-field-wide"><span>{t("planning.icon" as never)}</span><div className="planning-icon-picker">{subjectIconOptions.map(({ name, label, Icon }) => <button type="button" key={name} disabled={Boolean(linkedSubject)} className={eventIcon === name ? "selected" : ""} onClick={() => set("icon", name)} aria-label={t(label as never)} aria-pressed={eventIcon === name}><Icon size={18} /></button>)}</div></div>
+      <div className="planning-field planning-field-wide"><span>{t("planning.color" as never)}</span><div className="planning-swatches">{subjectColors.map((option) => <button type="button" key={option.value} className={`planning-swatch ${eventColor.toLowerCase() === option.value.toLowerCase() ? "selected" : ""}`} style={{ background: option.value }} onClick={() => set("color", option.value)} aria-label={option.name} aria-pressed={eventColor.toLowerCase() === option.value.toLowerCase()} title={option.name} />)}</div></div>
+      <div className="planning-field planning-field-wide"><span>{t("planning.icon" as never)}</span><div className="planning-icon-picker">{subjectIconOptions.map(({ name, label, Icon }) => <button type="button" key={name} className={eventIcon === name ? "selected" : ""} onClick={() => set("icon", name)} aria-label={t(label as never)} aria-pressed={eventIcon === name}><Icon size={18} /></button>)}</div></div>
       <div className="planning-field planning-field-wide"><span>{t("planning.preview" as never)}</span><div className="planning-event planning-preview-event" style={{ "--event-fill": `color-mix(in srgb, ${eventColor} 15%, var(--surface))`, "--event-ink": "var(--text)", "--event-line": eventColor } as React.CSSProperties}><span className="planning-event-title"><PreviewIcon size={15} /><strong>{values.title || t("planning.courseNamePlaceholder" as never)}</strong></span>{(values.teacher || values.room) && <span className="planning-event-meta">{[values.teacher, values.room].filter(Boolean).join(" · ")}</span>}<span className="planning-event-time">{values.startTime}–{values.endTime}</span></div></div>
-      <div className="planning-form-actions"><button type="button" className="secondary-button" onClick={onClose}>{t("actions.cancel" as never)}</button><button type="submit" className="primary-button">{mode === "create" ? t("planning.addCourse" as never) : t("actions.save" as never)}</button></div>
+      {saveError && <p className="planning-validation-error" role="alert">{saveError}</p>}
+      <div className="planning-form-actions"><button type="button" className="secondary-button" disabled={saving} onClick={onClose}>{t("actions.cancel" as never)}</button><button type="submit" className="primary-button" disabled={saving}>{saving ? t("settings.saving" as never) : mode === "create" ? t("planning.addCourse" as never) : t("actions.save" as never)}</button></div>
     </form>
   );
 }
@@ -364,22 +413,24 @@ function PlanningEventForm({ initial, mode, initialDate, schoolYear, subjects, o
 function PlanningSettings({ value, onClose, onSave, t }: {
   value: SchoolYear;
   onClose: () => void;
-  onSave: (value: SchoolYear, close: boolean) => void;
+  onSave: (value: SchoolYear, close: boolean, onProgress: (value: SchoolYear) => void) => Promise<void>;
   t: (key: never, values?: Record<string, string | number>) => string;
 }) {
   const [draft, setDraft] = useState(value);
   const [invalidYear, setInvalidYear] = useState(false);
   const [blockErrors, setBlockErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const addBlock = (kind: CalendarBlock["kind"]) => setDraft((current) => ({ ...current, blocks: [...current.blocks, { id: createPlanningId(), kind, name: "", startsOn: "", endsOn: "" }] }));
-  const updateBlock = (id: string, fields: Partial<CalendarBlock>) => {
+  const updateBlock = (id: string | number, fields: Partial<CalendarBlock>) => {
     setDraft((current) => ({ ...current, blocks: current.blocks.map((block) => block.id === id ? { ...block, ...fields } : block) }));
-    setBlockErrors((current) => { const next = { ...current }; delete next[id]; return next; });
+    setBlockErrors((current) => { const next = { ...current }; delete next[String(id)]; return next; });
   };
-  const removeBlock = (id: string) => {
+  const removeBlock = (id: string | number) => {
     setDraft((current) => ({ ...current, blocks: current.blocks.filter((block) => block.id !== id) }));
-    setBlockErrors((current) => { const next = { ...current }; delete next[id]; return next; });
+    setBlockErrors((current) => { const next = { ...current }; delete next[String(id)]; return next; });
   };
-  const saveSettings = () => {
+  const saveSettings = async () => {
     if (!draft.startsOn || !draft.endsOn || draft.endsOn < draft.startsOn) {
       setInvalidYear(true);
       return;
@@ -387,17 +438,26 @@ function PlanningSettings({ value, onClose, onSave, t }: {
     const errors: Record<string, string> = {};
     const validBlocks = draft.blocks.filter((block) => {
       if (!block.startsOn || !block.endsOn) {
-        errors[block.id] = t(block.kind === "break" ? "planning.breakDatesRequired" as never : "planning.holidayDateRequired" as never);
+        errors[String(block.id)] = t(block.kind === "break" ? "planning.breakDatesRequired" as never : "planning.holidayDateRequired" as never);
         return false;
       }
       if (block.endsOn < block.startsOn) {
-        errors[block.id] = t("planning.invalidBreakRange" as never);
+        errors[String(block.id)] = t("planning.invalidBreakRange" as never);
         return false;
       }
       return true;
     }).map((block) => ({ ...block, name: block.name?.trim() || undefined }));
     setBlockErrors(errors);
-    onSave({ ...draft, blocks: validBlocks }, Object.keys(errors).length === 0);
+    if (Object.keys(errors).length) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave({ ...draft, blocks: validBlocks }, true, setDraft);
+    } catch {
+      setSaveError(t("planning.saveError" as never));
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <PlanningModal className="planning-settings-modal" title={t("planning.settingsTitle" as never)} description={t("planning.settingsDescription" as never)} onClose={onClose}>
@@ -406,7 +466,8 @@ function PlanningSettings({ value, onClose, onSave, t }: {
           <CalendarBlockList kind="break" blocks={draft.blocks.filter((block) => block.kind === "break")} errors={blockErrors} onAdd={() => addBlock("break")} onChange={updateBlock} onRemove={removeBlock} t={t} />
           <CalendarBlockList kind="holiday" blocks={draft.blocks.filter((block) => block.kind === "holiday")} errors={blockErrors} onAdd={() => addBlock("holiday")} onChange={updateBlock} onRemove={removeBlock} t={t} />
         </div>
-        <div className="planning-modal-footer"><button className="secondary-button" onClick={onClose}>{t("actions.cancel" as never)}</button><button className="primary-button" onClick={saveSettings}>{t("actions.save" as never)}</button></div>
+        {saveError && <p className="planning-validation-error" role="alert">{saveError}</p>}
+        <div className="planning-modal-footer"><button className="secondary-button" disabled={saving} onClick={onClose}>{t("actions.cancel" as never)}</button><button className="primary-button" disabled={saving} onClick={saveSettings}>{saving ? t("settings.saving" as never) : t("actions.save" as never)}</button></div>
     </PlanningModal>
   );
 }
@@ -416,8 +477,8 @@ function CalendarBlockList({ kind, blocks, errors, onAdd, onChange, onRemove, t 
   blocks: CalendarBlock[];
   errors: Record<string, string>;
   onAdd: () => void;
-  onChange: (id: string, fields: Partial<CalendarBlock>) => void;
-  onRemove: (id: string) => void;
+  onChange: (id: string | number, fields: Partial<CalendarBlock>) => void;
+  onRemove: (id: string | number) => void;
   t: (key: never, values?: Record<string, string | number>) => string;
 }) {
   const isBreak = kind === "break";
@@ -433,11 +494,16 @@ type PlanningPageProps = { subjects: Subject[]; onGoToCourses: () => void };
 
 export default function PlanningPage({ subjects, onGoToCourses }: PlanningPageProps) {
   const { t, language } = useI18n();
+  const { user } = useAuth();
   const [today, setToday] = useState(() => new Date());
   const [now, setNow] = useState(() => new Date());
   const [view, setView] = useState<ViewMode>(() => window.matchMedia("(max-width: 760px)").matches ? "day" : "week");
   const [selectedDate, setSelectedDate] = useState(() => new Date());
-  const [planningState, setPlanningState] = useState<PlanningState>(loadPlanningState);
+  const [planningState, setPlanningState] = useState<PlanningState>(emptyPlanningState);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const schoolYear = planningState.schoolYear;
   const events = planningState.events;
   const setSchoolYear = (nextSchoolYear: SchoolYear) => setPlanningState((current) => ({ ...current, schoolYear: nextSchoolYear }));
@@ -449,12 +515,52 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
   const [showBreaks, setShowBreaks] = useState(true);
   const [search, setSearch] = useState("");
   useEffect(() => {
-    try {
-      window.localStorage.setItem(PLANNING_STORAGE_KEY, JSON.stringify(planningState));
-    } catch (error) {
-      console.error("[planning] local storage save failed", error);
+    let active = true;
+    setLoading(true);
+    setLoadError(false);
+    setPlanningState(emptyPlanningState);
+    if (!user) {
+      setLoading(false);
+      return () => { active = false; };
     }
-  }, [planningState]);
+    void (async () => {
+      try {
+        const years = await api.getPlanningYears();
+        const todayKey = toDateKey(new Date());
+        const selectedYear = years.find((year) => year.starts_on <= todayKey && year.ends_on >= todayKey) ?? years[0];
+        if (!selectedYear) return;
+        const [blocks, series] = await Promise.all([
+          api.getPlanningCalendarBlocks(selectedYear.id),
+          api.getPlanningSeries(selectedYear.id),
+        ]);
+        const exceptions = await api.getPlanningExceptions(series.map((item) => item.id));
+        if (!active) return;
+        const exceptionsBySeries = new Map<number, PlanningException[]>();
+        for (const exception of exceptions) {
+          const current = exceptionsBySeries.get(exception.series_id) ?? [];
+          current.push(exception);
+          exceptionsBySeries.set(exception.series_id, current);
+        }
+        setPlanningState({
+          schoolYear: {
+            id: selectedYear.id,
+            name: selectedYear.name,
+            startsOn: selectedYear.starts_on,
+            endsOn: selectedYear.ends_on,
+            timeZone: selectedYear.time_zone,
+            blocks: blocks.map(calendarBlockFromRow),
+          },
+          events: series.map((row) => eventFromRow(row, exceptionsBySeries.get(row.id) ?? [])),
+        });
+      } catch (error) {
+        console.error("[planning] load failed", error);
+        if (active) setLoadError(true);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [user?.id, retryCount]);
   useEffect(() => {
     const timer = window.setInterval(() => { setToday(new Date()); setNow(new Date()); }, 60_000);
     return () => window.clearInterval(timer);
@@ -469,9 +575,13 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
     : view === "month"
       ? formatDate(selectedDate, locale, { month: "long", year: "numeric" })
       : `${formatDate(dates[0], locale, { day: "numeric", month: "short" })} – ${formatDate(dates[6], locale, { day: "numeric", month: "short", year: "numeric" })}`;
-  const resolvedOccurrences = occurrences.map((occurrence) => {
-    const exception = occurrence.event.exceptions[occurrence.date];
+  const occurrenceSubjectId = (occurrence: Occurrence) => {
+    const exception = occurrence.event.exceptions[occurrence.occurrenceDate];
     const subjectId = exception?.subjectId !== undefined ? exception.subjectId : occurrence.event.subjectId;
+    return subjectId !== null && subjects.some((subject) => subject.id === subjectId) ? subjectId : null;
+  };
+  const resolvedOccurrences = occurrences.map((occurrence) => {
+    const subjectId = occurrenceSubjectId(occurrence);
     const linkedSubject = subjectId === null ? undefined : subjects.find((subject) => subject.id === subjectId);
     const linkedColor = subjectColors.find((color) => color.value.toLowerCase() === linkedSubject?.color?.toLowerCase())?.value;
     const linkedIcon = subjectIconOptions.find((option) => option.name === normalizeSubjectIcon(linkedSubject?.icon))?.name;
@@ -481,7 +591,11 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
       icon: (linkedIcon ?? occurrence.icon) as IconKey,
     };
   });
-  const resolveTitle = (occurrence: Occurrence) => occurrence.title;
+  const resolveTitle = (occurrence: Occurrence) => {
+    const subjectId = occurrenceSubjectId(occurrence);
+    const subject = subjectId === null ? undefined : subjects.find((item) => item.id === subjectId);
+    return subject ? `${subject.name} · ${occurrence.title}` : occurrence.title;
+  };
   const filteredOccurrences = search.trim() ? resolvedOccurrences.filter((occurrence) => resolveTitle(occurrence).toLowerCase().includes(search.toLowerCase())) : resolvedOccurrences;
   const formatDayHeader = (date: Date) => formatDate(date, locale, { weekday: "short", day: "numeric" });
   const changePeriod = (direction: number) => {
@@ -490,36 +604,191 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
     else setSelectedDate((date) => new Date(date.getFullYear(), date.getMonth() + direction, 15, 12));
   };
   const blocksOn = (date: Date) => schoolYear.blocks.filter((block) => (showBreaks || block.kind !== "break") && toDateKey(date) >= block.startsOn && toDateKey(date) <= block.endsOn);
-  const saveNewEvent = (values: EventFormValues) => {
-    setEvents((current) => [{ ...values, id: createPlanningId(), cancelled: false, cancelledDates: [], exceptions: {} }, ...current]);
-    setModal(null);
+  const saveNewEvent = async (values: EventFormValues) => {
+    if (schoolYear.id === null) throw new Error("Année scolaire absente.");
+    setSaveError(false);
+    try {
+      const recurrence = values.recurrence === "once" ? "once" : "weekly";
+      const row = await api.createPlanningSeries({
+        year_id: schoolYear.id,
+        entry_type: "class",
+        title: values.title,
+        subject_id: values.subjectId,
+        teacher: values.teacher || null,
+        room: values.room || null,
+        day_of_week: values.dayOfWeek,
+        recurrence,
+        week_pattern: recurrence === "once" ? "all" : values.weekPattern,
+        starts_on: recurrence === "once" ? values.date ?? toDateKey(selectedDate) : schoolYear.startsOn,
+        ends_on: recurrence === "once" ? null : schoolYear.endsOn,
+        start_time: values.startTime,
+        end_time: values.endTime,
+        color_key: values.color,
+        icon_key: values.icon,
+        status: "active",
+      });
+      const savedEvent = eventFromRow(row, []);
+      setEvents((current) => [savedEvent, ...current]);
+      setModal(null);
+    } catch (error) {
+      setSaveError(true);
+      throw error;
+    }
   };
-  const updateEvent = (values: EventFormValues, occurrence: Occurrence, scope: "series" | "occurrence") => {
-    setEvents((current) => current.map((event) => {
-      if (event.id !== occurrence.event.id) return event;
-      if (scope === "series") return { ...event, ...values, id: event.id, cancelled: event.cancelled, cancelledDates: event.cancelledDates, exceptions: event.exceptions };
-      const { date: _date, dayOfWeek: _dayOfWeek, recurrence: _recurrence, ...patch } = values;
-      return { ...event, exceptions: { ...event.exceptions, [occurrence.date]: { ...event.exceptions[occurrence.date], ...patch } } };
-    }));
-    setModal(null);
+  const updateEvent = async (values: EventFormValues, occurrence: Occurrence, scope: "series" | "occurrence") => {
+    setSaveError(false);
+    try {
+      if (scope === "series") {
+        const recurrence = values.recurrence === "once" ? "once" : "weekly";
+        const row = await api.updatePlanningSeries(occurrence.event.id, {
+          year_id: schoolYear.id ?? occurrence.event.yearId,
+          entry_type: "class",
+          title: values.title,
+          subject_id: values.subjectId,
+          teacher: values.teacher || null,
+          room: values.room || null,
+          day_of_week: values.dayOfWeek,
+          recurrence,
+          week_pattern: recurrence === "once" ? "all" : values.weekPattern,
+          starts_on: recurrence === "once" ? values.date ?? occurrence.date : schoolYear.startsOn,
+          ends_on: recurrence === "once" ? null : schoolYear.endsOn,
+          start_time: values.startTime,
+          end_time: values.endTime,
+          color_key: values.color,
+          icon_key: values.icon,
+          status: "active",
+        });
+        setEvents((current) => current.map((event) => event.id === row.id ? { ...eventFromRow(row, []), exceptions: event.exceptions, cancelledDates: event.cancelledDates } : event));
+      } else {
+        const previous = occurrence.event.exceptions[occurrence.occurrenceDate];
+        const overrides = {
+          title: values.title,
+          subject_id: values.subjectId,
+          teacher: values.teacher || null,
+          room: values.room || null,
+          start_time: values.startTime,
+          end_time: values.endTime,
+          color_key: values.color,
+          icon_key: values.icon,
+        };
+        const row = await api.upsertPlanningException({
+          series_id: occurrence.event.id,
+          occurrence_date: occurrence.occurrenceDate,
+          status: "modified",
+          override_date: previous?.overrideDate ?? null,
+          overrides,
+        });
+        setEvents((current) => current.map((event) => event.id === row.series_id ? { ...event, exceptions: { ...event.exceptions, [row.occurrence_date]: exceptionPatchFromRow(row) } } : event));
+      }
+      setModal(null);
+    } catch (error) {
+      setSaveError(true);
+      throw error;
+    }
   };
-  const toggleOccurrenceCancelled = (occurrence: Occurrence) => {
-    setEvents((current) => current.map((event) => {
-      if (event.id !== occurrence.event.id) return event;
-      if (event.recurrence === "once") return { ...event, cancelled: !occurrence.cancelled };
-      const cancelledDates = occurrence.cancelled ? event.cancelledDates.filter((date) => date !== occurrence.date) : [...new Set([...event.cancelledDates, occurrence.date])];
-      return { ...event, cancelledDates };
-    }));
-    setModal(null);
+  const toggleOccurrenceCancelled = async (occurrence: Occurrence) => {
+    setSaveError(false);
+    try {
+      const previous = occurrence.event.exceptions[occurrence.occurrenceDate];
+      const restore = occurrence.cancelled && previous?.exceptionStatus === "cancelled";
+      let savedPatch: EventPatch | null = null;
+      if (restore && previous && Object.keys(eventPatchToOverrides(previous)).length) {
+        const overrides = eventPatchToOverrides(previous);
+        const row = await api.upsertPlanningException({ series_id: occurrence.event.id, occurrence_date: occurrence.occurrenceDate, status: "modified", override_date: previous.overrideDate ?? null, overrides });
+        savedPatch = exceptionPatchFromRow(row);
+      } else if (restore && previous?.exceptionId !== undefined) {
+        await api.deletePlanningException(previous.exceptionId);
+      } else {
+        const row = await api.upsertPlanningException({
+          series_id: occurrence.event.id,
+          occurrence_date: occurrence.occurrenceDate,
+          status: "cancelled",
+          override_date: previous?.overrideDate ?? null,
+          overrides: previous ? eventPatchToOverrides(previous) : {},
+        });
+        savedPatch = { exceptionId: row.id, exceptionStatus: row.status, overrideDate: row.override_date };
+      }
+      setEvents((current) => current.map((event) => {
+        if (event.id !== occurrence.event.id) return event;
+        const exceptions = { ...event.exceptions };
+        if (savedPatch) exceptions[occurrence.occurrenceDate] = savedPatch;
+        else delete exceptions[occurrence.occurrenceDate];
+        return { ...event, exceptions, cancelledDates: Object.entries(exceptions).filter(([, patch]) => patch.exceptionStatus === "cancelled").map(([date]) => date) };
+      }));
+      setModal(null);
+    } catch {
+      setSaveError(true);
+    }
   };
-  const deleteEvent = (occurrence: Occurrence) => {
+  const deleteEvent = async (occurrence: Occurrence) => {
     if (!window.confirm(t("planning.confirmDelete" as never))) return;
-    setEvents((current) => current.filter((event) => event.id !== occurrence.event.id));
-    setModal(null);
+    setSaveError(false);
+    try {
+      await api.deletePlanningSeries(occurrence.event.id);
+      setEvents((current) => current.filter((event) => event.id !== occurrence.event.id));
+      setModal(null);
+    } catch {
+      setSaveError(true);
+    }
+  };
+  const saveSettings = async (value: SchoolYear, _close: boolean, onProgress: (value: SchoolYear) => void) => {
+    setSaveError(false);
+    try {
+      const yearFields = {
+        name: value.name.trim() || "Année scolaire",
+        starts_on: value.startsOn,
+        ends_on: value.endsOn,
+        time_zone: value.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      };
+      const savedYear = value.id === null
+        ? await api.createPlanningYear(yearFields)
+        : await api.updatePlanningYear(value.id, yearFields);
+      let workingValue: SchoolYear = { ...value, id: savedYear.id, name: savedYear.name, timeZone: savedYear.time_zone };
+      onProgress(workingValue);
+      const savedYearState = { ...workingValue };
+      setPlanningState((current) => ({ ...current, schoolYear: { ...current.schoolYear, ...savedYearState, blocks: current.schoolYear.blocks } }));
+      const pendingDeleteBlocks = schoolYear.blocks.filter((oldBlock) => !value.blocks.some((block) => block.id === oldBlock.id));
+
+      for (const [index, block] of value.blocks.entries()) {
+        const fields = {
+          year_id: savedYear.id,
+          kind: block.kind,
+          name: block.name?.trim() || null,
+          starts_on: block.startsOn,
+          ends_on: block.kind === "holiday" ? block.startsOn : block.endsOn,
+          description: null,
+        } as const;
+        const savedBlock = typeof block.id === "number"
+          ? await api.updatePlanningCalendarBlock(block.id, fields)
+          : await api.createPlanningCalendarBlock(fields);
+        const nextBlocks = [...workingValue.blocks];
+        nextBlocks[index] = calendarBlockFromRow(savedBlock);
+        workingValue = { ...workingValue, blocks: nextBlocks };
+        onProgress(workingValue);
+        const progressValue = { ...workingValue, blocks: [...workingValue.blocks, ...pendingDeleteBlocks] };
+        setPlanningState((current) => ({ ...current, schoolYear: progressValue }));
+      }
+
+      const retainedIds = new Set(workingValue.blocks.flatMap((block) => typeof block.id === "number" ? [block.id] : []));
+      for (const block of schoolYear.blocks) {
+        if (typeof block.id === "number" && !retainedIds.has(block.id)) {
+          await api.deletePlanningCalendarBlock(block.id);
+          setPlanningState((current) => ({ ...current, schoolYear: { ...current.schoolYear, blocks: current.schoolYear.blocks.filter((item) => item.id !== block.id) } }));
+        }
+      }
+      setSchoolYear(workingValue);
+      setModal(null);
+    } catch (error) {
+      setSaveError(true);
+      throw error;
+    }
   };
   const openCreate = () => setModal({ kind: "create" });
   const hourTicks = Array.from({ length: (GRID_END_HOUR - GRID_START_HOUR) * 2 + 1 }, (_, index) => GRID_START_HOUR * 60 + index * 30);
   const currentTimeTop = (now.getHours() * 60 + now.getMinutes() - GRID_START_HOUR * 60) * HOUR_HEIGHT / 60;
+
+  if (loading) return <section className="planning-page" aria-live="polite">{t("planning.loading" as never)}</section>;
+  if (loadError) return <section className="planning-page"><p className="planning-validation-error" role="alert">{t("planning.loadError" as never)}</p><button type="button" className="secondary-button" onClick={() => setRetryCount((count) => count + 1)}>{t("actions.retry" as never)}</button></section>;
 
   return (
     <section className="planning-page" aria-label={t("planning.title" as never)}>
@@ -535,6 +804,7 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
           <button type="button" className="primary-button planning-add-button" onClick={openCreate}><Plus size={16} /> {t("planning.add" as never)}</button>
         </div>
       </header>
+      {saveError && <p className="planning-validation-error" role="alert">{t("planning.saveError" as never)}</p>}
       {schoolYear.blocks.length > 0 && <div className="planning-calendar-notice"><CalendarDays size={15} /><span>{schoolYear.blocks.length} {t("planning.calendarBlocksConfigured" as never)}</span><button type="button" onClick={() => setShowBreaks((current) => !current)} aria-pressed={showBreaks}>{showBreaks ? t("planning.hideBreaks" as never) : t("planning.showBreaks" as never)}<ChevronDown size={14} /></button></div>}
       {!events.length && <p className="planning-empty-notice">{t("planning.emptyStatus" as never)}</p>}
       {view === "month" ? (
@@ -543,10 +813,10 @@ export default function PlanningPage({ subjects, onGoToCourses }: PlanningPagePr
         <TimeGrid dates={dates} occurrences={filteredOccurrences} today={today} now={now} locale={locale} hourTicks={hourTicks} currentTimeTop={currentTimeTop} view={view} schoolYear={schoolYear} blocksOn={blocksOn} formatDayHeader={formatDayHeader} onSelectOccurrence={(occurrence) => setModal({ kind: "details", occurrence })} displayTitle={resolveTitle} t={t} />
       )}
       {modal?.kind === "create" && <PlanningModal title={t(yearIsConfigured ? "planning.addCourse" as never : "planning.configureYear" as never)} description={t(yearIsConfigured ? "planning.createDescription" as never : "planning.configureYearDescription" as never)} onClose={() => setModal(null)}>{yearIsConfigured ? <PlanningEventForm mode="create" initialDate={selectedDate} schoolYear={schoolYear} subjects={subjects} onGoToCourses={() => { setModal(null); onGoToCourses(); }} onClose={() => setModal(null)} onSave={saveNewEvent} t={t} /> : <div className="planning-year-required"><p>{t("planning.configureYearHint" as never)}</p><button type="button" className="primary-button" onClick={() => setModal({ kind: "settings" })}><Settings2 size={16} />{t("planning.settings" as never)}</button></div>}</PlanningModal>}
-      {modal?.kind === "details" && <EventDetails occurrence={modal.occurrence} title={resolveTitle(modal.occurrence)} onClose={() => setModal(null)} onEdit={() => modal.occurrence.event.recurrence === "once" ? setModal({ kind: "edit", occurrence: modal.occurrence, scope: "series" }) : setModal({ kind: "edit-scope", occurrence: modal.occurrence })} onToggleCancelled={() => toggleOccurrenceCancelled(modal.occurrence)} onDelete={() => deleteEvent(modal.occurrence)} t={t} />}
+      {modal?.kind === "details" && <EventDetails occurrence={modal.occurrence} title={resolveTitle(modal.occurrence)} error={saveError ? t("planning.actionError" as never) : ""} onClose={() => setModal(null)} onEdit={() => modal.occurrence.event.recurrence === "once" ? setModal({ kind: "edit", occurrence: modal.occurrence, scope: "series" }) : setModal({ kind: "edit-scope", occurrence: modal.occurrence })} onToggleCancelled={() => toggleOccurrenceCancelled(modal.occurrence)} onDelete={() => deleteEvent(modal.occurrence)} t={t} />}
       {modal?.kind === "edit-scope" && <PlanningModal title={t("planning.editScopeTitle" as never)} onClose={() => setModal(null)}><div className="planning-scope-options"><p>{t("planning.editScopeDescription" as never)}</p><button type="button" onClick={() => setModal({ kind: "edit", occurrence: modal.occurrence, scope: "occurrence" })}><CalendarDays size={18} /><span><strong>{t("planning.thisOccurrence" as never)}</strong><small>{modal.occurrence.date}</small></span><ChevronRight size={17} /></button><button type="button" onClick={() => setModal({ kind: "edit", occurrence: modal.occurrence, scope: "series" })}><CalendarDays size={18} /><span><strong>{t("planning.wholeSeries" as never)}</strong><small>{t("planning.seriesUpdateHint" as never)}</small></span><ChevronRight size={17} /></button><button type="button" disabled title={t("planning.futureUnavailable" as never)}><ArrowRight size={18} /><span><strong>{t("planning.thisAndFollowing" as never)}</strong><small>{t("planning.futureUnavailable" as never)}</small></span></button></div></PlanningModal>}
-      {modal?.kind === "edit" && <PlanningModal title={modal.scope === "series" ? t("planning.editSeries" as never) : t("planning.editOccurrence" as never)} description={modal.scope === "occurrence" ? `${t("planning.occurrenceOf" as never)} ${modal.occurrence.date}` : undefined} onClose={() => setModal(null)}><PlanningEventForm mode="edit" initialDate={parseDateKey(modal.occurrence.date)} schoolYear={schoolYear} subjects={subjects} onGoToCourses={() => { setModal(null); onGoToCourses(); }} initial={{ ...modal.occurrence.event, id: modal.occurrence.event.id, subjectId: modal.occurrence.event.exceptions[modal.occurrence.date]?.subjectId ?? modal.occurrence.event.subjectId, title: modal.occurrence.title, teacher: modal.occurrence.teacher, room: modal.occurrence.room, startTime: modal.occurrence.startTime, endTime: modal.occurrence.endTime, color: modal.occurrence.color, icon: modal.occurrence.icon }} onClose={() => setModal(null)} onSave={(values) => updateEvent(values, modal.occurrence, modal.scope)} t={t} /></PlanningModal>}
-      {modal?.kind === "settings" && <PlanningSettings value={schoolYear} onClose={() => setModal(null)} onSave={(value, close) => { setSchoolYear(value); if (close) setModal(null); }} t={t} />}
+      {modal?.kind === "edit" && <PlanningModal title={modal.scope === "series" ? t("planning.editSeries" as never) : t("planning.editOccurrence" as never)} description={modal.scope === "occurrence" ? `${t("planning.occurrenceOf" as never)} ${modal.occurrence.date}` : undefined} onClose={() => setModal(null)}><PlanningEventForm mode="edit" initialDate={parseDateKey(modal.occurrence.date)} schoolYear={schoolYear} subjects={subjects} onGoToCourses={() => { setModal(null); onGoToCourses(); }} initial={{ title: modal.occurrence.title, subjectId: occurrenceSubjectId(modal.occurrence), date: modal.occurrence.date, teacher: modal.occurrence.teacher, room: modal.occurrence.room, dayOfWeek: modal.occurrence.event.dayOfWeek, startTime: modal.occurrence.startTime, endTime: modal.occurrence.endTime, recurrence: modal.occurrence.event.recurrence, weekPattern: modal.occurrence.event.weekPattern, color: modal.occurrence.color, icon: modal.occurrence.icon }} onClose={() => setModal(null)} onSave={(values) => updateEvent(values, modal.occurrence, modal.scope)} t={t} /></PlanningModal>}
+      {modal?.kind === "settings" && <PlanningSettings value={schoolYear} onClose={() => setModal(null)} onSave={saveSettings} t={t} />}
     </section>
   );
 }
@@ -565,11 +835,11 @@ function PlanningModal({ title, description, children, onClose, className = "" }
   return createPortal(<div className="modal-backdrop planning-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal planning-modal ${className}`} role="dialog" aria-modal="true" aria-labelledby="planning-modal-title"><ModalHeader title={title} description={description} onClose={onClose} id="planning-modal-title" />{children}</section></div>, document.body);
 }
 
-function EventDetails({ occurrence, title, onClose, onEdit, onToggleCancelled, onDelete, t }: { occurrence: Occurrence; title: string; onClose: () => void; onEdit: () => void; onToggleCancelled: () => void; onDelete: () => void; t: (key: never, values?: Record<string, string | number>) => string }) {
+function EventDetails({ occurrence, title, error, onClose, onEdit, onToggleCancelled, onDelete, t }: { occurrence: Occurrence; title: string; error: string; onClose: () => void; onEdit: () => void; onToggleCancelled: () => void; onDelete: () => void; t: (key: never, values?: Record<string, string | number>) => string }) {
   const { language } = useI18n();
   const Icon = subjectIconOptions.find((option) => option.name === occurrence.icon)?.Icon ?? subjectIconOptions[0].Icon;
   const locale = language === "zh" ? "zh-CN" : language;
-  return <PlanningModal title={title} description={formatDate(parseDateKey(occurrence.date), locale, { weekday: "long", day: "numeric", month: "long" })} onClose={onClose}><div className="planning-event-details"><div className="planning-detail-color" style={{ color: occurrence.color }}><Icon size={22} /></div><div className="planning-detail-time"><Clock3 size={16} />{occurrence.startTime} – {occurrence.endTime}</div>{occurrence.teacher && <div className="planning-detail-meta"><UserRound size={16} />{occurrence.teacher}</div>}{occurrence.room && <div className="planning-detail-meta"><MapPin size={16} />{occurrence.room}</div>}{occurrence.cancelled && <div className="planning-cancelled-banner"><Ban size={16} />{t("planning.cancelled" as never)}</div>}</div><div className="planning-detail-actions"><button type="button" className="secondary-button" onClick={onEdit}><Pencil size={15} />{t("actions.edit" as never)}</button><button type="button" className="secondary-button" onClick={onToggleCancelled}>{occurrence.cancelled ? <Check size={15} /> : <Ban size={15} />}{occurrence.cancelled ? t("planning.restore" as never) : t("planning.cancelOccurrence" as never)}</button><button type="button" className="planning-delete-button" onClick={onDelete}><Trash2 size={15} />{t("actions.delete" as never)}</button></div></PlanningModal>;
+  return <PlanningModal title={title} description={formatDate(parseDateKey(occurrence.date), locale, { weekday: "long", day: "numeric", month: "long" })} onClose={onClose}><div className="planning-event-details"><div className="planning-detail-color" style={{ color: occurrence.color }}><Icon size={22} /></div><div className="planning-detail-time"><Clock3 size={16} />{occurrence.startTime} – {occurrence.endTime}</div>{occurrence.teacher && <div className="planning-detail-meta"><UserRound size={16} />{occurrence.teacher}</div>}{occurrence.room && <div className="planning-detail-meta"><MapPin size={16} />{occurrence.room}</div>}{occurrence.cancelled && <div className="planning-cancelled-banner"><Ban size={16} />{t("planning.cancelled" as never)}</div>}</div>{error && <p className="planning-validation-error" role="alert">{error}</p>}<div className="planning-detail-actions"><button type="button" className="secondary-button" onClick={onEdit}><Pencil size={15} />{t("actions.edit" as never)}</button><button type="button" className="secondary-button" onClick={onToggleCancelled}>{occurrence.cancelled ? <Check size={15} /> : <Ban size={15} />}{occurrence.cancelled ? t("planning.restore" as never) : t("planning.cancelOccurrence" as never)}</button><button type="button" className="planning-delete-button" onClick={onDelete}><Trash2 size={15} />{t("actions.delete" as never)}</button></div></PlanningModal>;
 }
 
 function TimeGrid({ dates, occurrences, today, now, locale, hourTicks, currentTimeTop, view, schoolYear, blocksOn, formatDayHeader, onSelectOccurrence, displayTitle, t }: {
@@ -589,7 +859,7 @@ function TimeGrid({ dates, occurrences, today, now, locale, hourTicks, currentTi
         {currentDay && currentTimeTop >= 0 && currentTimeTop < (GRID_END_HOUR - GRID_START_HOUR) * HOUR_HEIGHT && <div className="planning-current-time" style={{ top: `${currentTimeTop}px` }}><i /> <span>{`${pad(now.getHours())}:${pad(now.getMinutes())}`}</span></div>}
       </div>;
     })}</div>
-  </div></div><div className="planning-grid-caption"><span><i className="planning-caption-current" />{t("planning.currentTime" as never)}</span><span><AlertCircle size={14} />{t("planning.localData" as never)}</span></div></div>;
+  </div></div><div className="planning-grid-caption"><span><i className="planning-caption-current" />{t("planning.currentTime" as never)}</span></div></div>;
 }
 
 function MonthView({ dates, occurrences, today, locale, blocks, showBreaks, onSelectDate, onSelectOccurrence, displayTitle, t }: {
