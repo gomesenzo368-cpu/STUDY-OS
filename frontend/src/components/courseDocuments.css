@@ -1,4 +1,7 @@
 .course-documents { padding-top: 30px; margin-top: 30px; border-top: 1px solid var(--border); }
+.course-content-section { min-width: 0; padding-top: 18px; }
+.course-content-section-heading { margin-bottom: 5px; }
+.course-content-section-heading h2 { margin: 6px 0 0; font-size: 20px; }
 .course-documents-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .course-documents-heading h2 { margin: 6px 0 0; font-size: 20px; }
 .course-documents-input { display: none; }
@@ -7,7 +10,8 @@
 .course-document-preview { display: grid; width: 48px; height: 56px; flex: 0 0 auto; overflow: hidden; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--surface-muted); color: var(--accent); }
 .course-document-preview img { width: 100%; height: 100%; object-fit: cover; }
 .course-document-info { display: grid; min-width: 0; flex: 1; gap: 5px; }
-.course-document-info strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.course-document-open { overflow: hidden; padding: 0; background: transparent; color: var(--text); font-size: 13px; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.course-document-open:hover { color: var(--accent); }
 .course-document-info small { color: var(--text-muted); font-size: 11px; }
 .course-document-status { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; background: var(--surface-muted); color: var(--text-muted); font-size: 10px; }
 .course-document-status.status-ready { background: color-mix(in srgb, var(--success) 12%, var(--surface)); color: var(--success); }
@@ -32,9 +36,131 @@
 .create-course-document-list li { display: flex; min-width: 0; align-items: center; gap: 9px; padding-top: 7px; border-top: 1px solid var(--border); }
 .create-course-document-list li > span { overflow: hidden; min-width: 0; flex: 1; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .create-course-document-list li > small { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.course-document-viewer { position: fixed; z-index: 1000; inset: 0; display: grid; padding: 16px; background: rgb(14 20 24 / 88%); }
+.course-document-viewer.is-embedded { position: relative; inset: auto; display: block; padding: 0; background: transparent; }
+.course-document-reader-layout { display: grid; grid-template-columns: minmax(176px, 220px) minmax(0, 1fr); width: min(100%, 1760px); min-width: 0; min-height: 0; height: 100%; overflow: hidden; margin: 0 auto; background: #172126; }
+.course-document-viewer.is-embedded .course-document-reader-layout { width: 100%; max-width: none; height: clamp(420px, 72vh, 760px); border: 1px solid var(--border); border-radius: var(--radius-card); }
+.course-document-reader-sidebar { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid rgb(255 255 255 / 14%); background: #172126; color: #f4f6f5; }
+.course-document-reader-sidebar-heading { padding: 17px 14px 12px; color: #d5dedb; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.course-document-reader-document-list, .course-document-reader-page-list { display: grid; min-height: 0; align-content: start; gap: 5px; overflow: auto; padding: 0 8px 12px; }
+.course-document-reader-document-row { display: flex; min-width: 0; align-items: center; gap: 2px; }
+.course-document-reader-document { display: flex; min-width: 0; min-height: 56px; flex: 1; align-items: center; gap: 9px; padding: 8px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #d5dedb; text-align: left; }
+.course-document-reader-delete { display: grid; width: 34px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #aebbb7; }
+.course-document-reader-delete:hover { border-color: rgb(255 255 255 / 14%); background: #243238; color: #f27676; }
+.course-document-reader-delete:disabled { cursor: wait; opacity: .45; }
+.course-document-reader-document:hover, .course-document-reader-document.is-active, .course-document-page-thumb:hover { border-color: rgb(132 199 173 / 48%); background: #243238; }
+.course-document-reader-document-icon { display: grid; width: 28px; height: 34px; flex: 0 0 auto; place-items: center; color: #84c7ad; }
+.course-document-reader-document-copy { display: grid; min-width: 0; gap: 4px; }
+.course-document-reader-document-copy strong, .course-document-reader-current-document strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-document-reader-document-copy strong { font-size: 11px; }
+.course-document-reader-document-copy small, .course-document-reader-current-document span { color: #aebbb7; font-size: 10px; }
+.course-document-reader-back { display: flex; min-height: 44px; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid rgb(255 255 255 / 14%); background: transparent; color: #d5dedb; font-size: 11px; font-weight: 700; text-align: left; }
+.course-document-reader-current-document { display: grid; min-width: 0; gap: 4px; padding: 13px 12px; }
+.course-document-reader-current-document strong { font-size: 11px; }
+.course-document-page-thumb { display: grid; min-width: 0; gap: 4px; padding: 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #d5dedb; text-align: left; }
+.course-document-page-thumb.is-active { border-color: #84c7ad; background: #243238; }
+.course-document-page-thumb-preview { position: relative; display: grid; width: min(100%, 142px); min-height: 82px; overflow: hidden; place-items: center; aspect-ratio: 1 / 1.414; margin: 0 auto; background: #fff; color: #263236; }
+.course-document-page-thumb-preview canvas, .course-document-page-thumb-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.course-document-page-thumb-number { color: #d5dedb; font-size: 10px; text-align: center; }
+.course-document-reader-list-notice, .course-document-reader-list-error { padding: 12px 8px; margin: 0; color: #aebbb7; font-size: 11px; line-height: 1.45; }
+.course-document-reader-list-error { color: #ffaaaa; }
+.course-document-reader-empty { display: grid; min-height: 100%; align-content: center; justify-items: center; gap: 12px; padding: 28px; color: #e2e9e6; text-align: center; }
+.course-document-reader-empty svg { color: #a7e2cc; }
+.course-document-reader-empty span { max-width: 360px; color: #c0cbc7; font-size: 13px; line-height: 1.5; }
+.course-document-reader-main { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
+.course-document-viewer-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 10px 12px; border: 1px solid rgb(255 255 255 / 14%); border-left: 0; background: #172126; color: #f4f6f5; }
+.course-document-viewer-title { overflow: hidden; min-width: 0; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.course-document-viewer-controls { display: flex; min-width: 0; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.course-document-viewer-controls button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; gap: 6px; padding: 6px 9px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 4px; background: #243238; color: #f4f6f5; font-size: 12px; }
+.course-document-viewer-controls button.is-active { border-color: #84c7ad; color: #a7e2cc; }
+.course-document-viewer-controls button:disabled { opacity: .45; }
+.course-document-viewer-controls input[type="number"] { width: 54px; padding: 5px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 3px; background: #10191d; color: #fff; text-align: center; }
+.course-document-viewer-controls input[type="range"] { width: 92px; accent-color: #84c7ad; }
+.course-document-page-indicator, .course-document-zoom-value { color: #d5dedb; font-size: 12px; white-space: nowrap; }
+.course-document-viewer-close { flex: 0 0 auto; }
+.course-document-viewer-stage { display: block; min-width: 0; min-height: 0; overflow: auto; width: 100%; margin: 0; padding: 20px; border: 1px solid rgb(255 255 255 / 14%); background: #727a7e; }
+.course-document-reader-pages { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(320px, calc(720px * var(--reader-zoom, 1)))), 1fr)); align-items: start; gap: 16px; }
+.course-document-reader-stage.is-overview .course-document-reader-pages { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; }
+.course-document-reader-page { position: relative; display: grid; width: min(100%, max(320px, calc(720px * var(--reader-zoom, 1)))); min-width: 0; align-content: start; justify-self: center; overflow: visible; padding: 0; border: 1px solid rgb(25 35 39 / 18%); background: #fff; box-shadow: 0 4px 18px rgb(0 0 0 / 24%); color: #263236; text-align: left; }
+.course-document-reader-stage.is-fit-width .course-document-reader-page, .course-document-reader-stage.is-overview .course-document-reader-page { width: 100%; }
+.course-document-reader-stage.is-fit-width:not(.is-overview) .course-document-reader-pages { grid-template-columns: minmax(0, 1fr); }
+.course-document-reader-stage.is-fit-width:not(.is-overview) .course-document-docx-host-reader .docx-wrapper { grid-template-columns: minmax(0, 1fr); }
+.course-document-reader-stage.is-fit-width .course-document-docx-host-reader .docx, .course-document-reader-stage.is-overview .course-document-docx-host-reader .docx { width: 100%; max-width: 100%; }
+.course-document-reader-page.is-active { outline: 3px solid #84c7ad; outline-offset: 2px; }
+.course-document-reader-page > canvas, .course-document-reader-page > img { display: block; width: 100%; height: auto; }
+.course-document-reader-page-number { position: absolute; z-index: 1; top: 6px; left: 6px; padding: 3px 6px; border-radius: 3px; background: rgb(23 33 38 / 82%); color: #fff; font-size: 10px; }
+.course-document-reader-page-excerpt { display: block; overflow: hidden; padding: 8px; color: #263236; font-size: 9px; line-height: 1.4; }
+.course-document-reader-stage.is-overview .course-document-reader-page-excerpt { max-height: 120px; }
+.course-document-reader-stage.is-overview .course-document-reader-page-number { font-size: 9px; }
+.course-document-reader-stage .course-document-docx-host-reader { display: contents; width: 100%; max-width: none; }
+.course-document-reader-stage .course-document-docx-host-reader .docx-wrapper { display: grid; width: 100%; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(320px, calc(720px * var(--reader-zoom, 1)))), 1fr)); align-items: start; justify-items: center; gap: 16px; padding: 0 !important; background: transparent !important; }
+.course-document-reader-stage .course-document-docx-host-reader .docx { width: 100%; max-width: min(100%, max(320px, calc(720px * var(--reader-zoom, 1)))); min-width: 0; margin: 0 !important; box-shadow: 0 4px 18px rgb(0 0 0 / 24%); }
+.course-document-reader-stage.is-overview .course-document-docx-host-reader .docx-wrapper { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; }
+.course-document-reader-control-divider { width: 1px; height: 24px; margin: 0 2px; background: rgb(255 255 255 / 18%); }
+.course-document-viewer-stage.is-centered { place-items: center; }
+.course-document-viewer-stage canvas { display: block; max-width: none; height: auto; margin: 0 auto; box-shadow: 0 4px 24px rgb(0 0 0 / 28%); }
+.course-document-viewer-image { display: block; height: auto; max-width: none; box-shadow: 0 4px 24px rgb(0 0 0 / 28%); }
+.course-document-viewer-text { width: min(100%, 900px); min-height: 100%; padding: 48px; margin: 0; background: #fff; color: #20282b; font: 15px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.course-document-viewer-error, .course-document-viewer-loading { max-width: 720px; padding: 16px 20px; margin: 24px auto; background: #fff; color: #263236; font-size: 14px; }
+.course-document-docx-host { width: max-content; max-width: 100%; transform-origin: top center; }
+.course-document-docx-host .docx-wrapper { padding: 0 !important; background: transparent !important; }
+.course-document-docx-host .docx { max-width: calc(100vw - 100px); margin: 0 auto !important; box-shadow: 0 4px 24px rgb(0 0 0 / 28%); }
+.course-document-docx-host .docx[hidden] { display: none !important; }
+.course-document-embed { position: relative; display: block; width: fit-content; max-width: 100%; min-width: 220px; padding: 8px; margin: 16px 0; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--surface-muted); }
+.course-document-embed-preview { display: flex; max-width: 100%; align-items: center; gap: 12px; padding: 4px 28px 4px 4px; background: transparent; color: var(--text); text-align: left; }
+.course-document-embed-preview img { display: block; max-width: min(100%, 620px); max-height: 360px; object-fit: contain; }
+.course-document-embed-kind { display: grid; width: 48px; height: 52px; flex: 0 0 auto; place-items: center; background: var(--surface); color: var(--accent); font-size: 10px; font-weight: 700; }
+.course-document-embed-name { overflow-wrap: anywhere; font-size: 13px; font-weight: 600; }
+.course-document-embed-remove { position: absolute; top: 4px; right: 4px; display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid var(--border); border-radius: 50%; background: var(--surface); color: var(--text-muted); font-size: 18px; }
+.course-document-embed-unavailable { display: inline-block; padding: 10px 34px 10px 8px; color: var(--danger); font-size: 13px; }
+.course-document-inline-error { color: var(--danger); font-size: 11px; }
+.course-document-content-embed { display: block; width: 100%; min-width: 0; padding: 0; margin: 24px 0; border: 0; background: transparent; }
+.course-document-content-preview { display: block; width: 100%; padding: 0; background: transparent; color: var(--text); text-align: left; cursor: zoom-in; }
+.course-document-content-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.course-document-content-preview:hover { background: transparent; }
+.course-document-content-image { display: block; width: 100%; height: auto; max-width: 100%; margin: 0 auto; object-fit: contain; }
+.course-document-content-pdf-pages { display: grid; width: 100%; justify-items: center; gap: 22px; }
+.course-document-content-pdf-page { position: relative; display: grid; width: min(100%, 860px); overflow: hidden; place-items: center; background: #fff; box-shadow: 0 2px 12px rgb(0 0 0 / 16%); }
+.course-document-content-pdf-page canvas { display: block; width: 100%; height: auto; }
+.course-document-content-pdf-page[data-page-error="true"]::after { position: absolute; inset: 0; display: grid; place-items: center; background: #fff; color: var(--danger); content: "Impossible de rendre cette page PDF"; }
+.course-document-content-text { width: 100%; padding: 20px 24px; margin: 0; background: var(--surface-muted); color: var(--text); font: 14px/1.75 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.course-document-content-docx { width: 100%; max-width: 100%; overflow: visible; }
+.course-document-content-docx .docx-wrapper { display: grid; justify-items: center; gap: 22px; padding: 0 !important; background: transparent !important; }
+.course-document-content-docx .docx { width: min(100%, 860px); max-width: 100%; margin: 0 !important; box-shadow: 0 2px 12px rgb(0 0 0 / 16%); }
+.course-document-content-caption { padding: 7px 0 0; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.course-document-content-unavailable { display: inline-block; padding: 12px; color: var(--danger); font-size: 13px; }
+.course-document-content-embed[data-render-error="true"]::after { display: block; padding: 10px 0; color: var(--danger); content: "Le contenu du document n’a pas pu être chargé."; font-size: 13px; }
+.editor-surface.is-inserting-document figure { pointer-events: none; }
 @media (max-width: 560px) {
   .course-documents-heading { align-items: flex-start; }
   .course-document-row { gap: 9px; }
   .course-document-status { padding: 4px 6px; }
   .course-document-actions > button { width: auto; flex: 1; }
+  .course-document-viewer { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .course-document-viewer.is-embedded { padding: 0; }
+  .course-document-viewer.is-embedded .course-document-reader-layout { height: clamp(360px, 72dvh, 680px); }
+  .course-document-reader-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(105px, 24dvh) minmax(0, 1fr); }
+  .course-document-reader-sidebar { border-bottom: 0; }
+  .course-document-reader-document-list, .course-document-reader-page-list { display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; padding: 0 8px 8px; }
+  .course-document-reader-document { width: 168px; min-width: 168px; min-height: 58px; flex: 0 0 168px; }
+  .course-document-reader-document-row { width: 204px; min-width: 204px; flex: 0 0 204px; }
+  .course-document-reader-document-row .course-document-reader-document { width: auto; min-width: 0; flex: 1 1 auto; }
+  .course-document-reader-page-thumb { width: 86px; min-width: 86px; flex: 0 0 86px; }
+  .course-document-page-thumb-preview { width: 60px; min-height: 58px; }
+  .course-document-reader-current-document { padding: 7px 10px; }
+  .course-document-reader-back { min-height: 34px; }
+  .course-document-reader-main { grid-template-rows: auto minmax(0, 1fr); }
+  .course-document-viewer-toolbar { align-items: flex-start; flex-direction: column; gap: 7px; padding: 8px; border-left: 1px solid rgb(255 255 255 / 14%); }
+  .course-document-viewer-controls { justify-content: flex-start; gap: 4px; }
+  .course-document-viewer-controls button { min-height: 40px; padding: 5px 7px; }
+  .course-document-viewer-title { max-width: 100%; }
+  .course-document-viewer-stage { padding: 12px 8px; }
+  .course-document-reader-pages, .course-document-reader-stage .course-document-docx-host-reader .docx-wrapper { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .course-document-reader-page { width: max(min(100%, 320px), calc(100% * var(--reader-zoom, 1))); }
+  .course-document-reader-stage .course-document-docx-host-reader .docx { width: 100%; max-width: max(min(100%, 320px), calc(100% * var(--reader-zoom, 1))); }
+  .course-document-reader-stage.is-fit-width .course-document-reader-page, .course-document-reader-stage.is-overview .course-document-reader-page, .course-document-reader-stage.is-fit-width .course-document-docx-host-reader .docx, .course-document-reader-stage.is-overview .course-document-docx-host-reader .docx { width: 100%; }
+  .course-document-reader-stage.is-overview .course-document-reader-pages, .course-document-reader-stage.is-overview .course-document-docx-host-reader .docx-wrapper { grid-template-columns: repeat(auto-fit, minmax(min(100%, 135px), 1fr)); }
+  .course-document-viewer-text { padding: 22px; font-size: 13px; }
+  .course-document-content-embed { min-width: 0; width: 100%; }
+  .course-document-content-preview { width: 100%; }
 }

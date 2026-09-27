@@ -66,8 +66,14 @@ class CourseDocumentRead(BaseModel):
     status: str
     created_at: str
     updated_at: str
+    signed_url: str | None = None
     preview_url: str | None = None
     preview_error: str | None = None
+
+
+class SignedCourseDocumentUrl(BaseModel):
+    signed_url: str
+    expires_in: int
 
 
 def _is_service_role_key(key: str) -> bool:
@@ -265,6 +271,25 @@ class SupabaseCourseDocumentService:
         await self.remove_object(storage_path)
         await self.remove_row(document_id, course_id)
 
+    async def document_signed_url(self, course_id: int, document_id: uuid.UUID) -> str:
+        rows = await self.request(
+            "GET",
+            "/rest/v1/course_documents",
+            params={
+                "id": f"eq.{document_id}",
+                "course_id": f"eq.{course_id}",
+                "user_id": f"eq.{self.user.user_id}",
+                "select": "storage_path",
+                "limit": "1",
+            },
+        )
+        if not isinstance(rows, list) or not rows:
+            raise DocumentServiceError(404, "Document introuvable.")
+        storage_path = rows[0].get("storage_path")
+        if not isinstance(storage_path, str):
+            raise DocumentServiceError(503, "Chemin de stockage invalide.")
+        return await self.signed_preview_url(storage_path)
+
     async def delete_course_documents(self, course_id: int) -> None:
         for row in await self.rows(course_id):
             try:
@@ -436,17 +461,20 @@ async def list_course_documents(
     course_id: int,
     service: SupabaseCourseDocumentService = Depends(get_document_service),
 ) -> list[CourseDocumentRead]:
+    step = "course_lookup"
     try:
         await service.ensure_course(course_id)
+        step = "document_query"
         rows = await service.rows(course_id)
-    except DocumentServiceError as error:
-        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
-    logger.info("course_documents event=list_loaded course_id=%d document_count=%d", course_id, len(rows))
-    documents: list[CourseDocumentRead] = []
-    for row in rows:
-        if row.get("document_type") == "image":
+        logger.info("course_documents event=list_loaded course_id=%d document_count=%d", course_id, len(rows))
+        documents: list[CourseDocumentRead] = []
+        for row in rows:
+            step = "signed_url_generation"
             try:
-                row["preview_url"] = await service.signed_preview_url(str(row["storage_path"]))
+                signed_url = await service.signed_preview_url(str(row["storage_path"]))
+                row["signed_url"] = signed_url
+                if row.get("document_type") == "image":
+                    row["preview_url"] = signed_url
             except DocumentServiceError as error:
                 row["preview_error"] = error.detail
                 logger.warning(
@@ -455,8 +483,22 @@ async def list_course_documents(
                     error.status_code,
                     error.detail,
                 )
-        documents.append(CourseDocumentRead(**row))
-    return documents
+            step = "response_validation"
+            documents.append(CourseDocumentRead(**row))
+        return documents
+    except DocumentServiceError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+    except Exception as error:
+        logger.exception(
+            "course_documents event=list_failed course_id=%d step=%s error_type=%s",
+            course_id,
+            step,
+            type(error).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne lors du chargement des documents (étape : {step}).",
+        ) from None
 
 
 @router.delete("/{course_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -470,6 +512,20 @@ async def delete_course_document(
         await service.delete_document(course_id, document_id)
     except DocumentServiceError as error:
         raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+
+@router.get("/{course_id}/documents/{document_id}/signed-url", response_model=SignedCourseDocumentUrl)
+async def get_course_document_signed_url(
+    course_id: int,
+    document_id: uuid.UUID,
+    service: SupabaseCourseDocumentService = Depends(get_document_service),
+) -> SignedCourseDocumentUrl:
+    try:
+        await service.ensure_course(course_id)
+        signed_url = await service.document_signed_url(course_id, document_id)
+    except DocumentServiceError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+    return SignedCourseDocumentUrl(signed_url=signed_url, expires_in=SIGNED_URL_SECONDS)
 
 
 @router.delete("/{course_id}/documents", status_code=status.HTTP_204_NO_CONTENT)

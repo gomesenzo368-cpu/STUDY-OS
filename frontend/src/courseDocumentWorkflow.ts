@@ -37,6 +37,27 @@ export function removeCancelledUpload<T>(files: readonly T[], cancelledFile: T):
   return files.filter((file) => file !== cancelledFile)
 }
 
+type UploadCourseDocumentForInsertionOptions<TCourse extends { id: number }, TDocument extends { id: string }> = {
+  course?: TCourse
+  createCourse: () => Promise<TCourse>
+  file: File
+  signal?: AbortSignal
+  uploadDocument: (courseId: number, file: File, signal?: AbortSignal) => Promise<TDocument>
+}
+
+export async function uploadCourseDocumentForInsertion<
+  TCourse extends { id: number },
+  TDocument extends { id: string },
+>(options: UploadCourseDocumentForInsertionOptions<TCourse, TDocument>): Promise<{ course: TCourse; document: TDocument }> {
+  const course = options.course ?? await options.createCourse()
+  if (options.signal?.aborted) throw new DOMException('Import annulé.', 'AbortError')
+  const document = await options.uploadDocument(course.id, options.file, options.signal)
+  if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(document.id)) {
+    throw new Error('Le serveur a retourné un identifiant de document invalide.')
+  }
+  return { course, document }
+}
+
 type CreateCourseWithDocumentsOptions<TCourse extends { id: number }, TDocument> = {
   createCourse: () => Promise<TCourse>
   files: readonly File[]

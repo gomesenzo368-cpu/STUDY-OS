@@ -1,0 +1,278 @@
+:root {
+  --page-gutter: clamp(18px, 4vw, 64px);
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+}
+
+.app-shell,
+.main-content,
+.page-wrap,
+.module-page {
+  min-width: 0;
+}
+
+.sidebar {
+  width: clamp(220px, 20vw, 264px);
+  flex-basis: clamp(220px, 20vw, 264px);
+}
+
+.topbar {
+  min-width: 0;
+  padding-inline: var(--page-gutter);
+}
+
+.search-box {
+  min-width: 0;
+}
+
+.page-wrap {
+  width: 100%;
+  max-width: 1760px;
+  padding: clamp(32px, 4.4vw, 64px) var(--page-gutter) calc(90px + env(safe-area-inset-bottom));
+  margin-inline: auto;
+}
+
+.module-page {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+.module-header {
+  max-width: min(100%, 820px);
+}
+
+.subject-grid,
+.stats-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+
+.module-action-grid,
+.assistant-prompt-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+}
+
+.module-subject-grid,
+.progress-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+}
+
+.study-mode-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+}
+
+.course-detail {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+.course-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.course-content img,
+.course-content video,
+.course-content iframe {
+  max-width: 100%;
+}
+
+.course-content img,
+.course-content video {
+  height: auto;
+}
+
+.course-content table,
+.course-content pre {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.editor-toolbar {
+  min-width: 0;
+}
+
+.editor-toolbar > select,
+.editor-toolbar > label,
+.editor-toolbar > button {
+  max-width: 100%;
+}
+
+.organization-page,
+.folder-detail,
+.settings-page {
+  width: 100%;
+}
+
+.organization-page {
+  max-width: 1180px;
+}
+
+.folder-detail {
+  max-width: 1280px;
+}
+
+.settings-page {
+  max-width: 1400px;
+}
+
+.search-results {
+  width: 100%;
+  max-width: 1200px;
+}
+
+.planning-page {
+  max-width: 1600px;
+}
+
+.course-document-viewer-toolbar,
+.course-document-viewer-stage {
+  min-width: 0;
+}
+
+.course-document-docx-host .docx {
+  max-width: min(100%, calc(100vw - 32px));
+}
+
+@media (max-width: 1100px) {
+  .sidebar {
+    width: 220px;
+    flex-basis: 220px;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    display: none;
+  }
+
+  .topbar {
+    height: 68px;
+  }
+
+  .topbar-title,
+  .notification-button {
+    display: none;
+  }
+
+  .mobile-brand {
+    display: flex;
+  }
+
+  .mobile-menu {
+    display: grid;
+  }
+
+  .top-actions {
+    gap: 8px;
+  }
+
+  .search-box {
+    width: 36px;
+    flex: 0 0 auto;
+  }
+
+  .search-box input,
+  .search-box kbd {
+    display: none;
+  }
+
+  .welcome-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .mobile-nav {
+    position: fixed;
+    z-index: 3;
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    left: max(8px, env(safe-area-inset-left));
+    display: flex;
+    overflow-x: auto;
+    padding: 6px;
+    scrollbar-width: none;
+    touch-action: pan-x;
+  }
+
+  .mobile-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-nav button {
+    min-width: 48px;
+    min-height: 48px;
+    flex: 0 0 48px;
+    padding: 5px 2px;
+    font-size: 9px;
+    line-height: 1.1;
+    white-space: normal;
+  }
+
+  .mobile-nav button svg {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+  }
+
+  .page-wrap {
+    padding-top: clamp(30px, 4vw, 42px);
+    padding-bottom: calc(104px + env(safe-area-inset-bottom));
+  }
+
+  .course-detail .breadcrumbs {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .page-wrap {
+    padding-inline: 16px;
+  }
+
+  .welcome-row h1,
+  .module-header h1,
+  .detail-header h1,
+  .folder-detail-title h1,
+  .settings-heading h1 {
+    overflow-wrap: anywhere;
+  }
+
+  .detail-header {
+    gap: 12px;
+  }
+
+  .detail-actions > button {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .editor-toolbar button,
+  .editor-toolbar > select,
+  .editor-toolbar > label {
+    min-height: 40px;
+  }
+
+  .editor-toolbar button {
+    min-width: 40px;
+  }
+
+  .course-document-viewer-controls button,
+  .icon-button,
+  .row-actions button,
+  .close-button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .course-document-viewer-toolbar {
+    width: 100%;
+  }
+}

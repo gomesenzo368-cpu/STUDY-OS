@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
-import { FileImage, FileText, Trash2, Upload, X } from 'lucide-react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { FileImage, FileText, Upload, X } from 'lucide-react'
 import { api } from '../api'
 import type { CourseDocumentUploadProgress } from '../api'
 import { removeCancelledUpload } from '../courseDocumentWorkflow'
 import type { CourseDocument } from '../types'
+import CourseDocumentViewer from './CourseDocumentViewer'
 import './courseDocuments.css'
 
 type PendingDocument = { key: string; file: File; previewUrl: string | null }
@@ -33,16 +34,10 @@ function formatFileSize(bytes: number) {
   return `${new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 }).format(bytes / divisor)} ${unit}`
 }
 
-function statusLabel(status: CourseDocument['status']) {
-  return {
-    uploaded: 'Importé',
-    processing: 'En traitement',
-    ready: 'Prêt',
-    failed: 'Échec',
-  }[status]
-}
+export type CourseDocumentsHandle = { openImport: () => void }
+type CourseDocumentsProps = { courseId: number; onDocumentsChanged?: () => void; refreshKey?: number }
 
-export default function CourseDocuments({ courseId }: { courseId: number }) {
+const CourseDocuments = forwardRef<CourseDocumentsHandle, CourseDocumentsProps>(function CourseDocuments({ courseId, onDocumentsChanged, refreshKey = 0 }, ref) {
   const [documents, setDocuments] = useState<CourseDocument[]>([])
   const [pending, setPending] = useState<PendingDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -51,23 +46,32 @@ export default function CourseDocuments({ courseId }: { courseId: number }) {
   const [uploadProgress, setUploadProgress] = useState<CourseDocumentUploadProgress | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [listError, setListError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const previewUrls = useRef(new Set<string>())
   const uploadController = useRef<AbortController | null>(null)
   const activeUploadKey = useRef<string | null>(null)
+  const loadedCourseId = useRef(courseId)
+
+  useImperativeHandle(ref, () => ({ openImport: () => inputRef.current?.click() }), [])
 
   useEffect(() => {
     let active = true
+    if (loadedCourseId.current !== courseId) {
+      loadedCourseId.current = courseId
+      setDocuments([])
+    }
     setLoading(true)
     setError(null)
+    setListError(null)
     void api.getCourseDocuments(courseId)
       .then((result) => { if (active) setDocuments(result) })
       .catch((cause: unknown) => {
-        if (active) setError(cause instanceof Error ? cause.message : 'GET /api/courses/documents : erreur inconnue.')
+        if (active) setListError(cause instanceof Error ? cause.message : 'GET /api/courses/documents : erreur inconnue.')
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [courseId])
+  }, [courseId, refreshKey])
 
   useEffect(() => () => {
     previewUrls.current.forEach((url) => URL.revokeObjectURL(url))
@@ -166,6 +170,7 @@ export default function CourseDocuments({ courseId }: { courseId: number }) {
       } catch (cause) {
         setError(cause instanceof Error ? `Documents importés, mais actualisation impossible : ${cause.message}` : 'Documents importés, mais la liste n’a pas pu être actualisée.')
       }
+      onDocumentsChanged?.()
       if (inputRef.current) inputRef.current.value = ''
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === 'AbortError') {
@@ -197,12 +202,13 @@ export default function CourseDocuments({ courseId }: { courseId: number }) {
   const cancelUpload = () => uploadController.current?.abort()
 
   const removeDocument = async (document: CourseDocument) => {
-    if (!window.confirm(`Supprimer « ${document.original_filename} » et son fichier original ?`)) return
+    if (!window.confirm(`Supprimer « ${document.original_filename} » et son fichier original ? Les blocs qui le référencent resteront dans le contenu et afficheront « Document indisponible ».`)) return
     setDeletingId(document.id)
     setError(null)
     try {
       await api.deleteCourseDocument(courseId, document.id)
       setDocuments((current) => current.filter((item) => item.id !== document.id))
+      onDocumentsChanged?.()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Impossible de supprimer ce document.')
     } finally {
@@ -217,9 +223,6 @@ export default function CourseDocuments({ courseId }: { courseId: number }) {
           <span className="section-kicker">SOURCES</span>
           <h2 id="course-documents-title">Documents du cours</h2>
         </div>
-        <button className="small-button" type="button" onClick={() => inputRef.current?.click()} disabled={uploading}>
-          <Upload size={15} /> Importer
-        </button>
         <input
           ref={inputRef}
           className="course-documents-input"
@@ -274,36 +277,16 @@ export default function CourseDocuments({ courseId }: { courseId: number }) {
       {error && <p className="course-documents-error" role="alert">{error}</p>}
       {uploadState === 'complete' && pending.length === 0 && <p className="course-document-result is-success">Import terminé.</p>}
       {uploadState === 'cancelled' && pending.length === 0 && <p className="course-document-result">Import annulé. Les documents déjà enregistrés sont conservés.</p>}
-      {loading ? (
-        <p className="course-documents-empty">Chargement des documents...</p>
-      ) : documents.length ? (
-        <ol className="course-document-list" aria-label="Documents associés au cours">
-          {documents.map((document) => (
-            <li className="course-document-row" key={document.id}>
-              <span className="course-document-preview">
-                  {document.preview_url ? <img src={document.preview_url} alt="" title={document.preview_error ?? undefined} /> : document.document_type === 'image' ? <FileImage size={21} /> : <FileText size={21} />}
-              </span>
-              <span className="course-document-info">
-                <strong title={document.original_filename}>{document.original_filename}</strong>
-                  <small title={document.preview_error ?? undefined}>{formatFileSize(document.file_size)} · {document.position + 1}{document.preview_error ? ' · Aperçu indisponible' : ''}</small>
-              </span>
-              <span className={`course-document-status status-${document.status}`}>{statusLabel(document.status)}</span>
-              <button
-                className="icon-button course-document-delete"
-                type="button"
-                title="Supprimer le document"
-                aria-label={`Supprimer ${document.original_filename}`}
-                onClick={() => void removeDocument(document)}
-                disabled={deletingId === document.id}
-              >
-                <Trash2 size={16} />
-              </button>
-            </li>
-          ))}
-        </ol>
-      ) : !pending.length ? (
-        <p className="course-documents-empty">Aucun document importé pour ce cours.</p>
-      ) : null}
+      <CourseDocumentViewer
+        inline
+        documents={documents}
+        listLoading={loading}
+        listError={listError}
+        onDeleteDocument={removeDocument}
+        deletingDocumentId={deletingId}
+      />
     </section>
   )
-}
+})
+
+export default CourseDocuments

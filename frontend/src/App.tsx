@@ -32,14 +32,15 @@ import {
   Eye,
 } from "lucide-react";
 import { api, type CourseDocumentUploadProgress } from "./api";
-import { createCourseWithDocuments, CourseDocumentWorkflowError, removeCancelledUpload } from "./courseDocumentWorkflow";
+import { createCourseWithDocuments, CourseDocumentWorkflowError, removeCancelledUpload, uploadCourseDocumentForInsertion } from "./courseDocumentWorkflow";
 import RichTextEditor from "./components/RichTextEditor";
-import CourseDocuments from "./components/CourseDocuments";
+import CourseDocuments, { type CourseDocumentsHandle } from "./components/CourseDocuments";
+import CourseContent from "./components/CourseContent";
 import SubjectEditor from "./components/SubjectEditor";
-import DOMPurify from "dompurify";
 import type {
   Chapter,
   Course,
+  CourseDocument,
   CourseFolder,
   Entity,
   Subject,
@@ -172,6 +173,7 @@ function App() {
   const [selectedSubject, setSelectedSubject] = useState<number | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+  const [courseDocumentsRevision, setCourseDocumentsRevision] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<number | null>(null);
   const [previewFolderId, setPreviewFolderId] = useState<number | null>(null);
   const [folderAddMenuId, setFolderAddMenuId] = useState<number | null>(null);
@@ -776,14 +778,19 @@ function App() {
                 course={selected.course}
                 subjects={subjects}
                 chapters={chapters}
+                courseFolders={courseFolders}
+                documentRevision={courseDocumentsRevision}
+                onDocumentsChanged={() => setCourseDocumentsRevision((revision) => revision + 1)}
                 onBack={() => setSelectedCourseId(null)}
                 onStudy={() => setPage("study")}
                 onEdit={(item) => setModal({ entity: "courses", item })}
                 onDelete={remove}
-                onMoved={async () => {
+                onMoved={async (movedCourse) => {
                   setSelectedCourseId(null);
+                  setOpenFolderId(movedCourse.folder_id);
                   await loadData();
                 }}
+                onRefresh={loadData}
               />
             ) : openFolderId !== null && selectedChapter ? (
               <FolderDetail
@@ -910,6 +917,7 @@ function App() {
             subjects={subjects}
             chapters={chapters}
             courseFolders={courseFolders}
+            onDocumentsChanged={() => setCourseDocumentsRevision((revision) => revision + 1)}
             onClose={() => setModal(null)}
             onSaved={async (savedItem) => {
               setModal(null);
@@ -1811,47 +1819,71 @@ function FolderCourseAddModal({
   );
 }
 
-function CourseDetail({
+export function CourseDetail({
   course,
   subjects,
   chapters,
+  courseFolders,
+  documentRevision,
+  onDocumentsChanged,
   onBack,
   onStudy,
   onEdit,
   onDelete,
   onMoved,
+  onRefresh,
 }: {
   course: Course;
   subjects: Subject[];
   chapters: Chapter[];
+  courseFolders: CourseFolder[];
+  documentRevision: number;
+  onDocumentsChanged: () => void;
   onBack: () => void;
   onStudy: () => void;
   onEdit: (course: Course) => void;
   onDelete: (entity: Entity, id: number, label: string) => void;
-  onMoved: () => Promise<void>;
+  onMoved: (course: Course) => Promise<void>;
+  onRefresh: () => Promise<void>;
 }) {
   const { t } = useI18n();
+  const courseDocumentsRef = useRef<CourseDocumentsHandle>(null);
   const chapter = chapters.find((item) => item.id === course.chapter_id);
   const subject = subjects.find((item) => item.id === chapter?.subject_id);
-  const [moveChapter, setMoveChapter] = useState(course.chapter_id);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [destinationFolderId, setDestinationFolderId] = useState<number | null>(course.folder_id);
   const [moving, setMoving] = useState(false);
+  const [moveError, setMoveError] = useState('');
+  const destinationFolders = courseFolders.filter((folder) => folder.chapter_id === course.chapter_id);
+  const destinationUnchanged = destinationFolderId === course.folder_id;
+  const openMoveDialog = () => {
+    setDestinationFolderId(course.folder_id);
+    setMoveError('');
+    setMoveDialogOpen(true);
+  };
   const move = async () => {
-    if (moveChapter === course.chapter_id) return;
+    if (destinationUnchanged || moving) return;
     setMoving(true);
+    setMoveError('');
     try {
-      await api.updateCourse(course, {
-        chapter_id: moveChapter,
-        title: course.title,
-        content: course.content,
-        original_content: course.original_content,
-        source_type: course.source_type,
-        folder_id: course.folder_id,
-      });
-      await onMoved();
+      const movedCourse = await api.moveCourse(course, destinationFolderId);
+      setMoveDialogOpen(false);
+      await onMoved(movedCourse);
+    } catch (err) {
+      setMoveError(err instanceof Error ? err.message : 'Le cours n’a pas pu être déplacé.');
+      await onRefresh();
     } finally {
       setMoving(false);
     }
   };
+  useEffect(() => {
+    if (!moveDialogOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !moving) setMoveDialogOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [moveDialogOpen, moving]);
   return (
     <section className="course-detail">
       <button className="back-button" onClick={onBack}>
@@ -1880,12 +1912,16 @@ function CourseDetail({
         <button className="primary-button" onClick={() => onEdit(course)}>
           <Pencil size={16} /> {t('actions.edit')}
         </button>
+        <button className="secondary-button" type="button" onClick={() => courseDocumentsRef.current?.openImport()}>
+          <Upload size={16} /> Importer
+        </button>
         <button
           className="secondary-button"
-          onClick={move}
-          disabled={moving || moveChapter === course.chapter_id}
+          type="button"
+          onClick={openMoveDialog}
+          disabled={moving}
         >
-          <MoveRight size={16} /> {moving ? t('actions.moving') : t('actions.move')}
+          <MoveRight size={16} /> {t('actions.move')}
         </button>
         <button
           className="danger-button"
@@ -1894,31 +1930,14 @@ function CourseDetail({
           <Trash2 size={16} /> {t('actions.delete')}
         </button>
       </div>
-      <div className="move-panel">
-        <label>
-          {t('actions.move')}
-          <select
-            value={moveChapter}
-            onChange={(event) => setMoveChapter(Number(event.target.value))}
-          >
-            {chapters.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span>{t('course.moveInfo')}</span>
-      </div>
-      <article
-        className="course-content"
-        dangerouslySetInnerHTML={{
-          __html: DOMPurify.sanitize(
-            course.content || `<p>${t('library.nothing')}</p>`,
-          ),
-        }}
-      />
-      <CourseDocuments courseId={course.id} />
+      <section className="course-content-section" aria-labelledby="course-content-heading">
+        <div className="course-content-section-heading">
+          <span className="section-kicker">CONTENU</span>
+          <h2 id="course-content-heading">Contenu du cours</h2>
+        </div>
+        <CourseContent courseId={course.id} content={course.content || `<p>${t('library.nothing')}</p>`} refreshKey={documentRevision} />
+      </section>
+      <CourseDocuments ref={courseDocumentsRef} courseId={course.id} onDocumentsChanged={onDocumentsChanged} refreshKey={documentRevision} />
       <div className="course-meta">
         <span>
           {t('course.created', { date: new Date(course.created_at).toLocaleDateString() })}
@@ -1927,6 +1946,28 @@ function CourseDetail({
           {t('course.updated', { date: new Date(course.updated_at).toLocaleDateString() })}
         </span>
       </div>
+      {moveDialogOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !moving && setMoveDialogOpen(false)}>
+        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="move-course-title">
+          <div className="modal-head">
+            <div><span className="section-kicker">COURS</span><h2 id="move-course-title">Déplacer le cours</h2></div>
+            <button className="close-button" type="button" onClick={() => !moving && setMoveDialogOpen(false)} disabled={moving} aria-label="Fermer"><X size={18} /></button>
+          </div>
+          <label>
+            Dossier destination
+            <select value={destinationFolderId ?? ''} disabled={moving} onChange={(event) => setDestinationFolderId(event.target.value ? Number(event.target.value) : null)}>
+              <option value="">À la racine du chapitre</option>
+              {destinationFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            </select>
+          </label>
+          {moveError && <p className="alert" role="alert">{moveError}</p>}
+          <div className="modal-actions">
+            <button className="secondary-button" type="button" onClick={() => setMoveDialogOpen(false)} disabled={moving}>Annuler</button>
+            <button className="primary-button" type="button" onClick={() => void move()} disabled={moving || destinationUnchanged}>
+              {moving ? t('actions.moving') : 'Confirmer le déplacement'}
+            </button>
+          </div>
+        </section>
+      </div>}
     </section>
   );
 }
@@ -1948,6 +1989,7 @@ function Editor({
   subjects,
   chapters,
   courseFolders,
+  onDocumentsChanged,
   onClose,
   onSaved,
   onDocumentUploadComplete,
@@ -1957,6 +1999,7 @@ function Editor({
   subjects: Subject[];
   chapters: Chapter[];
   courseFolders: CourseFolder[];
+  onDocumentsChanged: () => void;
   onClose: () => void;
   onSaved: (item?: Chapter | CourseFolder | Course) => Promise<void>;
   onDocumentUploadComplete?: (course: Course) => void;
@@ -2008,8 +2051,25 @@ function Editor({
   const [documentUploadState, setDocumentUploadState] = useState<'idle' | 'uploading' | 'complete' | 'failed' | 'cancelled'>('idle');
   const [documentUploadError, setDocumentUploadError] = useState<string | null>(null);
   const [uploadingDocuments, setUploadingDocuments] = useState(false);
+  const [courseDocuments, setCourseDocuments] = useState<CourseDocument[]>([]);
   const documentInputRef = useRef<HTMLInputElement>(null);
   const documentUploadController = useRef<AbortController | null>(null);
+  const currentCourseId = entity === 'courses'
+    ? isEdit && item && 'id' in item ? (item as Course).id : createdCourse?.id
+    : undefined;
+  useEffect(() => {
+    let active = true;
+    if (!currentCourseId) {
+      setCourseDocuments([]);
+      return () => { active = false; };
+    }
+    void api.getCourseDocuments(currentCourseId).then((loaded) => {
+      if (active) setCourseDocuments(loaded);
+    }).catch((cause: unknown) => {
+      if (active) setDocumentUploadError(cause instanceof Error ? cause.message : 'Les documents du cours sont indisponibles.');
+    });
+    return () => { active = false; };
+  }, [currentCourseId]);
   const courseChapters = chapters
     .filter((chapter) => chapter.subject_id === courseSubjectId)
     .sort(comparePositionedItems);
@@ -2022,6 +2082,71 @@ function Editor({
       setSourceType(imported.source_type);
     } catch (err) {
       onError(err instanceof Error ? err.message : t('errors.import'));
+    }
+  };
+  const courseFields = () => ({
+    chapter_id: Number(parentId),
+    folder_id: folderId,
+    title: name.trim(),
+    content,
+    original_content: isEdit && item && 'original_content' in item
+      ? item.original_content
+      : createdCourse?.original_content ?? content,
+    source_type: sourceType,
+  });
+  const createDraftCourse = async () => {
+    if (!name.trim()) throw new Error('Donne un titre au cours avant d’insérer un document.');
+    const fields = courseFields();
+    let course = await api.createCourse(folderContextLocked ? { ...fields, folder_id: null } : fields);
+    setCreatedCourse(course);
+    if (folderContextLocked && modal.folderId !== null && modal.folderId !== undefined && course.folder_id === null) {
+      course = await api.appendCourseToFolder(course, modal.folderId);
+    }
+    setCreatedCourse(course);
+    return course;
+  };
+  const insertDocumentAtCaret = async (file: File): Promise<CourseDocument> => {
+    if (uploadingDocuments) throw new Error('Un import documentaire est déjà en cours.');
+    setUploadingDocuments(true);
+    setDocumentUploadState('uploading');
+    setDocumentUploadError(null);
+    setDocumentUploadProgress(null);
+    const controller = new AbortController();
+    documentUploadController.current = controller;
+    try {
+      const { course, document } = await uploadCourseDocumentForInsertion({
+        course: isEdit ? item as Course : createdCourse ?? undefined,
+        createCourse: createDraftCourse,
+        file,
+        signal: controller.signal,
+        uploadDocument: async (courseId, selectedFile, signal) => {
+          const uploaded = await api.uploadCourseDocuments(courseId, [selectedFile], setDocumentUploadProgress, signal);
+          if (!uploaded[0]) throw new Error('Le serveur n’a retourné aucune référence de document.');
+          return uploaded[0];
+        },
+      });
+      let documentWithPreview = document;
+      try {
+        const signedUrl = await api.getCourseDocumentSignedUrl(course.id, document.id);
+        documentWithPreview = {
+          ...document,
+          signed_url: signedUrl,
+          preview_url: document.document_type === 'image' ? signedUrl : null,
+        };
+      } catch {
+        // The saved document can still be inserted; the viewer renews its URL when opened.
+      }
+      setCourseDocuments((current) => [...current.filter((entry) => entry.id !== documentWithPreview.id), documentWithPreview]);
+      onDocumentsChanged();
+      setDocumentUploadState('complete');
+      return documentWithPreview;
+    } catch (cause) {
+      setDocumentUploadState(cause instanceof DOMException && cause.name === 'AbortError' ? 'cancelled' : 'failed');
+      setDocumentUploadError(cause instanceof Error ? cause.message : 'Import documentaire impossible.');
+      throw cause;
+    } finally {
+      documentUploadController.current = null;
+      setUploadingDocuments(false);
     }
   };
   const selectCourseDocuments = (fileList: FileList | null) => {
@@ -2054,13 +2179,20 @@ function Editor({
     setDocumentUploadError(null);
     setDocumentFiles(selected);
   };
-  const closeEditor = () => {
+  const closeEditor = async () => {
     if (uploadingDocuments) {
       documentUploadController.current?.abort();
       return;
     }
-    if (createdCourse) void onSaved(createdCourse);
-    else onClose();
+    if (!createdCourse) {
+      onClose();
+      return;
+    }
+    try {
+      await onSaved(await api.updateCourse(createdCourse, courseFields()));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Enregistrement du cours impossible.');
+    }
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -2083,17 +2215,7 @@ function Editor({
           : await api.createCourseFolder(fields);
         await onSaved(savedFolder);
       } else if (entity === "courses") {
-          const fields = {
-            chapter_id: Number(parentId),
-            folder_id: folderId,
-            title: name.trim(),
-            content,
-            original_content:
-              isEdit && item && "original_content" in item
-                ? item.original_content
-                : content,
-            source_type: sourceType,
-          };
+          const fields = courseFields();
           if (!isEdit && documentFiles.length) {
             setUploadingDocuments(true);
             setDocumentUploadState('uploading');
@@ -2173,7 +2295,7 @@ function Editor({
   return (
     <div
       className="modal-backdrop"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+      onMouseDown={(event) => event.target === event.currentTarget && void closeEditor()}
     >
       <form className="modal course-editor-modal" onSubmit={submit}>
         <div className="modal-head">
@@ -2284,8 +2406,14 @@ function Editor({
               {t('editor.content')}
               <RichTextEditor
                 value={content}
-                onChange={setContent}
+                onChange={(nextContent) => {
+                  setContent(nextContent);
+                  setCreatedCourse((current) => current ? { ...current, content: nextContent } : current);
+                }}
                 onImport={importFile}
+                courseId={currentCourseId}
+                documents={courseDocuments}
+                onInsertDocument={insertDocumentAtCaret}
               />
             </label>
             {importedFilename && (

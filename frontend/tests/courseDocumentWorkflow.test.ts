@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createCourseWithDocuments, CourseDocumentWorkflowError, removeCancelledUpload } from '../src/courseDocumentWorkflow.ts'
+import { createCourseWithDocuments, CourseDocumentWorkflowError, removeCancelledUpload, uploadCourseDocumentForInsertion } from '../src/courseDocumentWorkflow.ts'
 
 const course = { id: 73 }
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name)
@@ -157,4 +157,40 @@ test('reports monotonic progress from transferred bytes and separates server sav
   })
   assert.deepEqual(progress, [13, 25, 25, 63, 99, 100])
   assert.deepEqual(phases, ['transferring', 'saving', 'saved', 'transferring', 'saving', 'saved'])
+})
+
+test('inserts into an existing course without creating another course', async () => {
+  const events: string[] = []
+  const result = await uploadCourseDocumentForInsertion({
+    course,
+    createCourse: async () => { events.push('create'); return course },
+    file: makeFile('photo.png', 10),
+    uploadDocument: async (courseId, file) => {
+      events.push(`upload:${courseId}:${file.name}`)
+      return { id: '2f1710e2-596f-4a2c-989e-df3f3d27a113' }
+    },
+  })
+  assert.deepEqual(events, ['upload:73:photo.png'])
+  assert.equal(result.document.id, '2f1710e2-596f-4a2c-989e-df3f3d27a113')
+})
+
+test('creates a new course before uploading and rejects fabricated document IDs', async () => {
+  const events: string[] = []
+  const result = await uploadCourseDocumentForInsertion({
+    createCourse: async () => { events.push('create'); return course },
+    file: makeFile('notes.txt', 10),
+    uploadDocument: async (courseId) => {
+      events.push(`upload:${courseId}`)
+      return { id: '2f1710e2-596f-4a2c-989e-df3f3d27a113' }
+    },
+  })
+  assert.deepEqual(events, ['create', 'upload:73'])
+  assert.equal(result.course.id, 73)
+
+  await assert.rejects(uploadCourseDocumentForInsertion({
+    course,
+    createCourse: async () => course,
+    file: makeFile('fake.txt', 10),
+    uploadDocument: async () => ({ id: 'client-generated-id' }),
+  }), /identifiant de document invalide/)
 })

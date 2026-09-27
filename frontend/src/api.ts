@@ -300,6 +300,28 @@ async function updateCourse(course: Course, fields: CourseFields): Promise<Cours
   return data as Course
 }
 
+async function moveCourse(course: Course, folderId: number | null): Promise<Course> {
+  if (course.folder_id === folderId) return course
+
+  if (course.folder_id !== null && folderId !== null) {
+    const { error } = await supabase.rpc('move_course_to_folder', {
+      p_course_id: course.id,
+      p_folder_id: folderId,
+    })
+    if (error) throwSupabaseError('courses', 'move between folders', error)
+    return { ...course, folder_id: folderId, folder_position: null }
+  }
+
+  if (folderId === null) {
+    const { error } = await supabase.rpc('remove_course_from_folder', { p_course_id: course.id })
+    if (error) throwSupabaseError('courses', 'remove from folder', error)
+    return { ...course, folder_id: null, folder_position: null }
+  }
+
+  const movedCourse = await appendCourseToFolder(course, folderId)
+  return { ...movedCourse, folder_id: folderId }
+}
+
 async function deleteCourse(id: number): Promise<void> {
   const user = await getAuthenticatedUser()
   await deleteCourseDocuments(id)
@@ -439,7 +461,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     if (!message) {
       const isServerError = response.status >= 500
       const fallback = isServerError
-        ? `Le serveur API est indisponible (HTTP ${response.status}). Vérifie que le backend FastAPI est démarré.`
+        ? `L’API a répondu HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`
         : `Le serveur API a répondu HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`
       throw new Error(responseText.trim() ? `${fallback} ${responseText.trim().slice(0, 240)}` : fallback)
     }
@@ -470,7 +492,8 @@ async function requestCourseDocuments<T>(path: string, options?: RequestInit): P
     } catch {
       // Preserve plain-text proxy and backend responses for document diagnostics.
     }
-    throw new Error(`${method} ${API_URL}${path} → HTTP ${response.status}${detail ? ` : ${detail}` : ''}`)
+    const emptyServerError = response.status >= 500 && !detail ? ' (réponse vide : vérifier le proxy et les logs FastAPI)' : ''
+    throw new Error(`${method} ${API_URL}${path} → HTTP ${response.status}${detail ? ` : ${detail}` : emptyServerError}`)
   }
   return response.status === 204 ? (undefined as T) : response.json()
 }
@@ -514,6 +537,11 @@ async function closeRevisionSession(sessionId: number, status: 'complete' | 'aba
 
 async function getCourseDocuments(courseId: number): Promise<CourseDocument[]> {
   return requestCourseDocuments<CourseDocument[]>(`/courses/${courseId}/documents`)
+}
+
+async function getCourseDocumentSignedUrl(courseId: number, documentId: string): Promise<string> {
+  const result = await requestCourseDocuments<{ signed_url: string }>(`/courses/${courseId}/documents/${documentId}/signed-url`)
+  return result.signed_url
 }
 
 export type CourseDocumentUploadProgress = {
@@ -638,6 +666,7 @@ export const api = {
   courses: loadCourses,
   reorderFolderCourses,
   appendCourseToFolder,
+  moveCourse,
   createCourse,
   updateCourse,
   deleteCourse,
@@ -665,6 +694,7 @@ export const api = {
   closeRevisionSession,
       deleteCourseDocuments,
     getCourseDocuments,
+    getCourseDocumentSignedUrl,
     uploadCourseDocuments,
     deleteCourseDocument,
   create: <T>(entity: string, body: object) => request<T>(`/${entity}`, { method: 'POST', body: JSON.stringify(body) }),

@@ -26,9 +26,11 @@ class FakeSupabase:
         self.fail_second_storage_upload = False
         self.fail_document_reads = False
         self.fail_signed_previews = False
+        self.malformed_document_rows = False
+        self.valid_tokens = {"verified-access-token"}
 
     def respond(self, request: httpx.Request) -> httpx.Response:
-        if request.headers.get("authorization") != "Bearer verified-access-token":
+        if request.headers.get("authorization", "").removeprefix("Bearer ") not in self.valid_tokens:
             return httpx.Response(401)
         if request.headers.get("apikey") != "public-key":
             return httpx.Response(401)
@@ -43,7 +45,7 @@ class FakeSupabase:
         if path == "/rest/v1/course_documents" and request.method == "GET":
             if self.fail_document_reads:
                 return httpx.Response(403, json={"code": "42501", "message": "row-level security policy denied"})
-            rows = list(self.documents.values())
+            rows = [dict(row) for row in self.documents.values()]
             course_id = request.url.params.get("course_id")
             user_id = request.url.params.get("user_id")
             document_id = request.url.params.get("id")
@@ -54,6 +56,8 @@ class FakeSupabase:
                 rows = [row for row in rows if str(row["user_id"]) == user_id.removeprefix("eq.")]
             if document_id:
                 rows = [row for row in rows if str(row["id"]) == document_id.removeprefix("eq.")]
+            if self.malformed_document_rows and rows:
+                rows[0]["course_id"] = "invalid-course-id"
             return httpx.Response(200, json=rows)
 
         if path == "/rest/v1/course_documents" and request.method == "POST":
@@ -95,13 +99,14 @@ class FakeSupabase:
 class CourseDocumentApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.supabase = FakeSupabase()
+        self.access_token = "verified-access-token"
         self.app = FastAPI()
         self.app.include_router(router)
 
         async def get_fake_service():
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.supabase.respond)) as client:
                 yield SupabaseCourseDocumentService(
-                    AuthenticatedUser(OWNER_ID, "verified-access-token"),
+                    AuthenticatedUser(OWNER_ID, self.access_token),
                     "https://project.supabase.co",
                     "public-key",
                     client,
@@ -126,6 +131,7 @@ class CourseDocumentApiTests(unittest.TestCase):
             ("POST", "/api/courses/{course_id}/documents"),
             ("DELETE", "/api/courses/{course_id}/documents"),
             ("DELETE", "/api/courses/{course_id}/documents/{document_id}"),
+            ("GET", "/api/courses/{course_id}/documents/{document_id}/signed-url"),
         }
         self.assertTrue(expected.issubset(mounted), expected - mounted)
 
@@ -189,11 +195,61 @@ class CourseDocumentApiTests(unittest.TestCase):
         listed = self.client.get("/api/courses/1/documents")
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertIn("/storage/v1/object/sign/course-originals/", listed.json()[0]["preview_url"])
+        self.assertEqual(listed.json()[0]["signed_url"], listed.json()[0]["preview_url"])
 
         deleted = self.client.delete(f"/api/courses/1/documents/{document['id']}")
         self.assertEqual(deleted.status_code, 204)
         self.assertEqual(self.supabase.documents, {})
         self.assertEqual(self.supabase.objects, {})
+
+    def test_persisted_document_is_retrieved_and_signed_in_a_new_owner_session(self) -> None:
+        uploaded = self.client.post(
+            "/api/courses/1/documents",
+            files=[("files", ("notes.txt", b"persistent notes", "text/plain"))],
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        document_id = uploaded.json()[0]["id"]
+        storage_path = uploaded.json()[0]["storage_path"]
+
+        first_read = self.client.get("/api/courses/1/documents")
+        self.assertEqual(first_read.status_code, 200, first_read.text)
+        self.assertEqual(first_read.json()[0]["id"], document_id)
+        self.assertEqual(self.supabase.objects[storage_path], b"persistent notes")
+
+        self.access_token = "refreshed-owner-session-token"
+        self.supabase.valid_tokens.add(self.access_token)
+        reopened_read = self.client.get("/api/courses/1/documents")
+
+        self.assertEqual(reopened_read.status_code, 200, reopened_read.text)
+        self.assertEqual(reopened_read.json()[0]["id"], document_id)
+        self.assertEqual(reopened_read.json()[0]["signed_url"], "https://project.supabase.co/storage/v1/object/sign/course-originals/test?token=signed")
+
+    def test_opening_document_renews_private_signed_url_for_the_authenticated_owner(self) -> None:
+        uploaded = self.client.post(
+            "/api/courses/1/documents",
+            files=[("files", ("notes.txt", b"private", "text/plain"))],
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        document_id = uploaded.json()[0]["id"]
+
+        response = self.client.get(f"/api/courses/1/documents/{document_id}/signed-url")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("/storage/v1/object/sign/course-originals/", response.json()["signed_url"])
+        self.assertEqual(response.json()["expires_in"], 600)
+
+    def test_another_user_cannot_renew_a_document_signed_url(self) -> None:
+        document_id = uuid.uuid4()
+        self.supabase.documents[str(document_id)] = {
+            "id": str(document_id),
+            "user_id": OTHER_USER_ID,
+            "course_id": 1,
+            "storage_path": f"{OTHER_USER_ID}/1/{document_id}/original.txt",
+        }
+
+        response = self.client.get(f"/api/courses/1/documents/{document_id}/signed-url")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_preview_permission_error_is_visible_without_hiding_the_document(self) -> None:
         uploaded = self.client.post(
@@ -250,6 +306,22 @@ class CourseDocumentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("Supabase PostgREST GET a répondu HTTP 403", response.json()["detail"])
         self.assertIn("row-level security policy denied", response.json()["detail"])
+
+    def test_unexpected_list_exception_identifies_the_backend_step(self) -> None:
+        uploaded = self.client.post(
+            "/api/courses/1/documents",
+            files=[("files", ("notes.txt", b"saved", "text/plain"))],
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        self.supabase.malformed_document_rows = True
+
+        with self.assertLogs("app.documents_api", level="ERROR") as captured:
+            response = self.client.get("/api/courses/1/documents")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("étape : response_validation", response.json()["detail"])
+        self.assertIn("event=list_failed", captured.output[0])
+        self.assertIn("ValidationError", "\n".join(captured.output))
 
     def test_disconnect_during_upload_removes_only_the_active_document(self) -> None:
         class DisconnectAfterMetadata:

@@ -199,6 +199,15 @@ class RevisionApiTests(unittest.TestCase):
         self.app.dependency_overrides[get_revision_service] = lambda: self.service
         self.client = TestClient(self.app)
 
+    def test_revision_session_list_route_exists_and_rejects_a_missing_session(self) -> None:
+        self.app.dependency_overrides.pop(get_revision_service)
+        self.app.dependency_overrides.pop(get_authenticated_user)
+
+        response = self.client.get("/api/revisions/sessions?limit=50")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Session Supabase requise.")
+
     def tearDown(self) -> None:
         self.client.close()
         self.app.dependency_overrides.clear()

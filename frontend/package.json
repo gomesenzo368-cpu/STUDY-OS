@@ -6,24 +6,31 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.ts && vitest run --environment jsdom tests/CourseDocuments.test.tsx"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "docx-preview": "^0.3.6",
     "dompurify": "^3.4.15",
     "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^4.10.38",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/dompurify": "^3.0.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.20",
+    "jsdom": "^25.0.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "~5.7.2",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "vitest": "^4.1.11"
   }
 }

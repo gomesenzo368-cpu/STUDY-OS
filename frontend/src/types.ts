@@ -6,7 +6,7 @@ export interface CourseFolder { id: number; user_id: string; chapter_id: number;
 export interface Course { id: number; user_id: string; chapter_id: number; folder_id: number | null; folder_position: number | null; title: string; content: string; original_content: string; source_type: string; created_at: string; updated_at: string }
 export type CourseDocumentStatus = 'uploaded' | 'processing' | 'ready' | 'failed'
 export type CourseDocumentType = 'image' | 'pdf' | 'text' | 'word'
-export interface CourseDocument { id: string; user_id: string; course_id: number; original_filename: string; storage_path: string; mime_type: string; file_size: number; file_hash: string; document_type: CourseDocumentType; position: number; status: CourseDocumentStatus; created_at: string; updated_at: string; preview_url: string | null; preview_error?: string | null }
+export interface CourseDocument { id: string; user_id: string; course_id: number; original_filename: string; storage_path: string; mime_type: string; file_size: number; file_hash: string; document_type: CourseDocumentType; position: number; status: CourseDocumentStatus; created_at: string; updated_at: string; signed_url?: string | null; preview_url: string | null; preview_error?: string | null }
 export type RevisionQuestionType = 'multiple_choice' | 'true_false' | 'short_answer'
 export type RevisionSessionStatus = 'in_progress' | 'completed' | 'abandoned'
 export interface RevisionChoice { id: string; text: string }
